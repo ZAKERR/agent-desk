@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            hooks -> target
+
+      - name: Build hook binary
+        run: cargo build --release --manifest-path hooks/Cargo.toml
+
+      - name: Install frontend deps (none needed — static HTML)
+        run: echo "No frontend build step"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Agent Desk ${{ github.ref_name }}'
+          releaseBody: |
+            See [README](https://github.com/ZAKERR/agent-desk#readme) for setup instructions.
+          releaseDraft: false
+          prerelease: false
+
+      - name: Upload hook binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hooks/target/release/agent-desk-hook.exe

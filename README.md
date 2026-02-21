@@ -16,6 +16,12 @@ Universal CLI agent monitor — a desktop Dynamic Island widget for [Claude Code
 - **Autostart** — optional boot-time launch via OS-level autostart
 - **Remote push** — Telegram / DingTalk / WeChat notifications (optional)
 
+## Screenshots
+
+| Dynamic Island (collapsed) | System Tray Menu |
+|:---:|:---:|
+| ![Bar](image/Bar.png) | ![Menu](image/Menu.png) |
+
 ## Quick Start
 
 ### Prerequisites
