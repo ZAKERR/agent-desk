@@ -23,21 +23,32 @@ jobs:
             src-tauri -> target
             hooks -> target
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
       - name: Build hook binary
         run: cargo build --release --manifest-path hooks/Cargo.toml
 
-      - name: Install frontend deps (none needed — static HTML)
-        run: echo "No frontend build step"
+      - name: Stage hook binary for Tauri bundling
+        run: |
+          mkdir -p src-tauri/binaries
+          cp hooks/target/release/agent-desk-hook.exe src-tauri/binaries/
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          tauriScript: cargo tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'Agent Desk ${{ github.ref_name }}'
           releaseBody: |
-            See [README](https://github.com/ZAKERR/agent-desk#readme) for setup instructions.
+            ## Install
+
+            Download and run the `.msi` or `-setup.exe` installer.
+            Hooks are auto-configured on first launch — no manual setup needed.
+
+            > Standalone hook binary is also attached for source-build users.
           releaseDraft: false
           prerelease: false
 

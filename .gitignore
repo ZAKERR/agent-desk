@@ -12,6 +12,9 @@ sessions.json
 # Tauri generated files
 src-tauri/gen/schemas/
 
+# Hook binary staged for bundling (built by CI or manually)
+src-tauri/binaries/
+
 # Test screenshots (root level)
 *.png
 

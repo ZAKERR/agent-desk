@@ -24,48 +24,62 @@ Universal CLI agent monitor — a desktop Dynamic Island widget for [Claude Code
 
 ## Quick Start
 
-### Prerequisites
+### Option A: Install from Release (recommended)
+
+1. Download the `.msi` or `-setup.exe` installer from [Releases](https://github.com/ZAKERR/agent-desk/releases)
+2. Run the installer
+3. Launch Agent Desk
+
+That's it. On first launch the app auto-configures Claude Code hooks in `~/.claude/settings.json` — no manual setup needed.
+
+### Option B: Build from Source
+
+#### Prerequisites
 
 - Windows 10/11
-- [Rust](https://rustup.rs/) toolchain
+- [Rust](https://rustup.rs/) toolchain (includes `cargo`)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://github.com/openai/codex)
 
-### Build
+#### Build & Run
 
 ```bash
-# Main app
-cd src-tauri && cargo build --release
+# 1. Build the hook binary
+cd hooks && cargo build --release && cd ..
 
-# Hook binary
-cd hooks && cargo build --release
+# 2. Copy hook binary next to the main exe (required for auto-configure)
+mkdir -p src-tauri/binaries
+cp hooks/target/release/agent-desk-hook.exe src-tauri/binaries/
+
+# 3. Build the main app
+cd src-tauri && cargo build --release && cd ..
+
+# 4. Copy hook binary next to the built exe
+cp hooks/target/release/agent-desk-hook.exe src-tauri/target/release/
+
+# 5. Run
+src-tauri/target/release/agent-desk.exe
 ```
 
-### Configure Hooks
+On first launch:
+- `config/config.yaml` is auto-created from the example template
+- `~/.claude/settings.json` is auto-configured with hook entries (if `agent-desk-hook.exe` is found next to the main exe)
 
-Add to `~/.claude/settings.json` (adjust path to your clone):
+#### Manual Hook Configuration (only if auto-configure doesn't apply)
+
+If you place the hook binary elsewhere, add to `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "type": "command", "command": "/path/to/agent-desk-hook.exe --event user_prompt" }],
-    "PreToolUse": [{ "type": "command", "command": "/path/to/agent-desk-hook.exe --event pre_tool" }],
-    "Stop": [{ "type": "command", "command": "/path/to/agent-desk-hook.exe --event stop" }],
-    "Notification": [{ "type": "command", "command": "/path/to/agent-desk-hook.exe --event notification" }],
-    "SessionStart": [{ "type": "command", "command": "/path/to/agent-desk-hook.exe --event session_start" }],
-    "SessionEnd": [{ "type": "command", "command": "/path/to/agent-desk-hook.exe --event session_end" }]
+    "UserPromptSubmit": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event user_prompt" }],
+    "PreToolUse": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event pre_tool" }],
+    "Stop": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event stop" }],
+    "Notification": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event notification" }],
+    "SessionStart": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event session_start" }],
+    "SessionEnd": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event session_end" }]
   }
 }
 ```
-
-Hook binary location: `hooks/target/release/agent-desk-hook.exe`
-
-### Run
-
-```bash
-src-tauri/target/release/agent-desk.exe
-```
-
-On first run, `config/config.yaml` is auto-created from the example template. Edit it to configure remote notifications or customize the island appearance.
 
 ## Configuration
 

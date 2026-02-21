@@ -39,6 +39,9 @@
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       }
+    },
+    "resources": {
+      "binaries/agent-desk-hook.exe": "agent-desk-hook.exe"
     }
   }
 }

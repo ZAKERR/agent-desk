@@ -11,6 +11,7 @@ mod remote;
 pub mod island;
 mod permission;
 mod chat;
+mod setup;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -19,6 +20,7 @@ pub fn run() {
     tracing_subscriber::fmt::init();
 
     let cfg = config::load_config();
+    setup::ensure_hooks_configured();
     let port = cfg.manager.port;
 
     // Prevent duplicate instances: if port is already in use, exit quietly
