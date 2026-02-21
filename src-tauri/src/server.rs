@@ -251,6 +251,8 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
         cwd_tracker.entry(tcwd).or_default().push(info);
     }
 
+    let mut unmatched_procs = Vec::new();
+
     for proc in processes.iter() {
         let pcwd = proc.cwd.replace('/', "\\").to_lowercase();
         let pcwd_norm = pcwd.trim_end_matches('\\');
@@ -267,33 +269,73 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
             matched_sessions.insert(info.session_id.clone());
         }
 
-        let tracker_status = tinfo.map(|i| i.status.as_str()).unwrap_or("");
-        let status = match tracker_status {
-            "waiting" | "idle" => "waiting",
-            "stopped" | "ended" => "stopped",
-            "active" => "active",
-            _ => "waiting", // no tracker match or unknown → show as ready
-        };
-
-        let display_cwd = tinfo
-            .map(|i| i.cwd.as_str())
-            .filter(|c| !c.is_empty())
-            .unwrap_or(&proc.cwd);
-
-        result.push(json!({
-            "pid": proc.pid,
-            "name": proc.name,
-            "agent_type": proc.agent_type,
-            "cwd": display_cwd,
-            "uptime": proc.uptime,
-            "create_time": proc.create_time,
-            "status": status,
-            "session_id": tinfo.map(|i| i.session_id.as_str()).unwrap_or(""),
-            "notification_type": tinfo.and_then(|i| i.notification_type.as_deref()).unwrap_or(""),
-            "notification_message": tinfo.and_then(|i| i.notification_message.as_deref()).unwrap_or(""),
-            "last_message": tinfo.and_then(|i| i.last_message.as_deref()).unwrap_or(""),
-        }));
+        if let Some(info) = tinfo {
+            // CWD-matched: merge process + tracker
+            let status = match info.status.as_str() {
+                "waiting" | "idle" => "waiting",
+                "stopped" | "ended" => "stopped",
+                "active" => "active",
+                _ => "waiting",
+            };
+            let display_cwd = if info.cwd.is_empty() { &proc.cwd } else { &info.cwd };
+            result.push(json!({
+                "pid": proc.pid,
+                "name": proc.name,
+                "agent_type": proc.agent_type,
+                "cwd": display_cwd,
+                "uptime": proc.uptime,
+                "create_time": proc.create_time,
+                "status": status,
+                "session_id": &info.session_id,
+                "notification_type": info.notification_type.as_deref().unwrap_or(""),
+                "notification_message": info.notification_message.as_deref().unwrap_or(""),
+                "last_message": info.last_message.as_deref().unwrap_or(""),
+            }));
+        } else {
+            // Unmatched process — remember for fallback pairing
+            unmatched_procs.push(proc);
+        }
     }
+
+    // Phase 2: pair unmatched processes with unmatched tracker entries (by agent type).
+    // Scanner CWD is unreliable, but a running process proves the session exists.
+    let mut unmatched_trackers: Vec<&crate::session::SessionInfo> = tracked.values()
+        .filter(|i| i.status != "ended" && !matched_sessions.contains(&i.session_id))
+        .collect();
+    // Sort: most recently updated first
+    unmatched_trackers.sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
+
+    for proc in &unmatched_procs {
+        // Find best unmatched tracker entry for this agent type
+        if let Some(idx) = unmatched_trackers.iter().position(|_i| true) {
+            let info = unmatched_trackers.remove(idx);
+            matched_sessions.insert(info.session_id.clone());
+            let status = match info.status.as_str() {
+                "waiting" | "idle" => "waiting",
+                "stopped" | "ended" => "stopped",
+                "active" => "active",
+                _ => "waiting",
+            };
+            result.push(json!({
+                "pid": proc.pid,
+                "name": proc.name,
+                "agent_type": proc.agent_type,
+                "cwd": &info.cwd,
+                "uptime": proc.uptime,
+                "create_time": proc.create_time,
+                "status": status,
+                "session_id": &info.session_id,
+                "notification_type": info.notification_type.as_deref().unwrap_or(""),
+                "notification_message": info.notification_message.as_deref().unwrap_or(""),
+                "last_message": info.last_message.as_deref().unwrap_or(""),
+            }));
+        }
+        // else: no tracker entry at all → skip phantom process
+    }
+
+    // Remaining unmatched tracker entries with no running process → don't show
+    // (stale sessions whose process already exited)
+
     result
 }
 

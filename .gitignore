@@ -2,6 +2,13 @@
 src-tauri/target/
 hooks/target/
 
+# User config (may contain tokens/secrets) — use config.example.yaml as template
+config/config.yaml
+
+# Runtime data
+events.jsonl
+sessions.json
+
 # Tauri generated files
 src-tauri/gen/schemas/
 
@@ -17,6 +24,7 @@ server.log
 
 # Claude Code local settings
 .claude/
+CLAUDE.md
 
 # OS files
 Thumbs.db

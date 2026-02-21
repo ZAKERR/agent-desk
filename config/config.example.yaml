@@ -1,5 +1,6 @@
-# AutoCLI 通知与控制配置
-# 首次使用前请填写需要的渠道配置
+# Agent Desk 配置文件
+# 复制此文件为 config.yaml 后修改，或直接运行（自动从此模板创建）
+# config.yaml 已被 .gitignore 忽略，不会提交到仓库
 
 # Telegram Bot (双向: 通知 + 远程控制)
 telegram:
@@ -22,18 +23,17 @@ wechat:
   pushplus_token: ""
   serverchan_sendkey: ""
 
-# 通知管理器 (python manager.py)
+# 通知管理器
 manager:
-  port: 15924                # HTTP 端口, 浏览器访问 http://localhost:15924
-  events_file: "D:/Lab/AutoCLI/events.jsonl"
+  port: 15924                # HTTP 端口
+  # events_file: ""          # 留空则自动使用 exe 同目录下 events.jsonl
   max_events_age: 86400      # 事件保留时间(秒)
   open_browser: true         # 启动时自动打开浏览器
 
-# 桌面伴侣 (transparent always-on-top companion blob)
+# 桌面伴侣
 widget:
-  enabled: true              # true = 启用桌面伴侣, false = 仅浏览器模式
-  on_top: true               # 始终置顶
-  opacity: 1.0               # 透明度 0.0-1.0 (保留, 未来使用)
+  enabled: true
+  on_top: true
 
 # 灵动岛 (Dynamic Island)
 island:
@@ -73,7 +73,7 @@ island:
 
 # 通用设置
 general:
-  sessions_file: "D:/Lab/AutoCLI/sessions.json"
+  # sessions_file: ""       # 留空则自动使用 exe 同目录下 sessions.json
   claude_cli: "claude"
-  git_bash_path: "D:/Program Files/Git/bin/bash.exe"  # Windows 必需
+  # git_bash_path: ""       # Windows 需要时填写, 如 "C:/Program Files/Git/bin/bash.exe"
   session_ttl: 86400         # 会话记录保留时间(秒)

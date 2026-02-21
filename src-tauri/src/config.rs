@@ -243,7 +243,22 @@ fn default_sessions_file() -> String {
 }
 
 pub fn load_config() -> Config {
-    let config_path = find_config_path();
+    let mut config_path = find_config_path();
+
+    // Auto-create config.yaml from example template on first run
+    if !config_path.exists() {
+        if let Some(example) = find_example_config() {
+            // Create config.yaml next to the example file (not in exe dir)
+            if let Some(parent) = example.parent() {
+                config_path = parent.join("config.yaml");
+            }
+            match std::fs::copy(&example, &config_path) {
+                Ok(_) => tracing::info!("Created {} from {}", config_path.display(), example.display()),
+                Err(e) => tracing::warn!("Failed to copy example config: {}", e),
+            }
+        }
+    }
+
     match std::fs::read_to_string(&config_path) {
         Ok(contents) => {
             serde_yaml::from_str(&contents).unwrap_or_else(|e| {
@@ -272,29 +287,54 @@ impl Default for Config {
     }
 }
 
-pub fn find_config_path() -> PathBuf {
-    // Check next to executable first
-    let exe_dir = app_dir();
-    let candidate = exe_dir.join("config").join("config.yaml");
-    if candidate.exists() {
-        return candidate;
+/// Search for config.example.yaml in all candidate directories.
+fn find_example_config() -> Option<PathBuf> {
+    let name = "config.example.yaml";
+    for dir in config_search_dirs() {
+        let p = dir.join(name);
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+/// All directories to search for config files, in priority order.
+fn config_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // 1. Next to executable
+    dirs.push(app_dir().join("config"));
+
+    // 2. Current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join("config"));
     }
 
-    // Check current working directory
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let candidate = cwd.join("config").join("config.yaml");
-    if candidate.exists() {
-        return candidate;
+    // 3. Parent of CWD (covers running from src-tauri/ during development)
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(parent) = cwd.parent() {
+            dirs.push(parent.join("config"));
+        }
     }
 
-    // Check %APPDATA%/agent-desk/config.yaml
+    // 4. %APPDATA%/agent-desk/
     if let Ok(appdata) = std::env::var("APPDATA") {
-        let candidate = PathBuf::from(appdata).join("agent-desk").join("config.yaml");
+        dirs.push(PathBuf::from(appdata).join("agent-desk"));
+    }
+
+    dirs
+}
+
+pub fn find_config_path() -> PathBuf {
+    let name = "config.yaml";
+    for dir in config_search_dirs() {
+        let candidate = dir.join(name);
         if candidate.exists() {
             return candidate;
         }
     }
 
-    // Default path (CWD-based)
-    candidate
+    // Default: first search dir (exe-relative)
+    config_search_dirs().into_iter().next()
+        .unwrap_or_else(|| PathBuf::from("config"))
+        .join(name)
 }
