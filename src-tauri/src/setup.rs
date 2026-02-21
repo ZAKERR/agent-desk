@@ -110,8 +110,8 @@ pub fn ensure_hooks_configured() {
     }
     let hooks = root["hooks"].as_object_mut().unwrap();
 
-    // Normalise path to backslashes for the Windows command string
-    let hook_cmd_path = hook_path.to_string_lossy().replace('/', "\\");
+    // Use forward slashes — Claude Code executes hooks via bash, which eats backslashes
+    let hook_cmd_path = hook_path.to_string_lossy().replace('\\', "/");
     let mut changed = false;
 
     for &(claude_event, hook_arg) in HOOK_EVENTS {
