@@ -71,15 +71,17 @@ If you place the hook binary elsewhere, add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event user_prompt" }],
-    "PreToolUse": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event pre_tool" }],
-    "Stop": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event stop" }],
-    "Notification": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event notification" }],
-    "SessionStart": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event session_start" }],
-    "SessionEnd": [{ "type": "command", "command": "C:\\path\\to\\agent-desk-hook.exe --event session_end" }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event user_prompt" }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event pre_tool" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event stop" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event notification" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event session_start" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event session_end" }] }]
   }
 }
 ```
+
+> **Important**: Use forward slashes (`C:/path/to/...`) in hook paths. Claude Code executes hooks via bash, which strips backslashes.
 
 ## Configuration
 
@@ -118,6 +120,80 @@ Hook events ──> agent-desk-hook.exe ──> HTTP API (port 15924)
                               │    Dynamic Island     │
                               │  (always-on-top pill) │
                               └───────────────────────┘
+```
+
+## FAQ
+
+### Hook errors: `agent-desk-hook.exe: command not found`
+
+Hook paths **must use forward slashes** (`C:/Program Files/Agent Desk/agent-desk-hook.exe`). Claude Code runs hooks via bash, which interprets backslashes (`\`) as escape characters and silently strips them. The auto-configure already handles this, but if you set paths manually, always use `/`.
+
+### Island stuck on "Working..." after Claude Code finishes
+
+Agent Desk didn't receive the `Stop` hook event. Common causes:
+- Hook binary not found (see error above)
+- Agent Desk is not running when Claude Code finishes
+- Port 15924 is blocked by firewall
+
+Check `~/.claude/settings.json` has all 6 hook events configured. You can also verify manually:
+```bash
+echo '{}' | agent-desk-hook.exe --event stop
+```
+
+### "Agent Desk is already running on port 15924"
+
+Only one instance can run at a time. Either close the existing one (system tray → Quit) or kill it:
+```bash
+taskkill /F /IM agent-desk.exe
+```
+
+### Hooks not auto-configured after install
+
+Auto-configure requires `agent-desk-hook.exe` to be in the same directory as the main `agent-desk.exe`. Check:
+1. Both files exist in the install directory
+2. `~/.claude/` directory is writable
+3. Check `~/.claude/settings.json` for a `hooks` section
+
+### Island disappeared / not visible
+
+- Press `Alt+D` (default hotkey) to toggle visibility
+- Right-click the system tray icon → "Show Island"
+- The island hides when another app takes focus in expanded mode — hover the pill area at the top center of your screen
+
+### No sessions showing in the island
+
+- Ensure Claude Code (or Codex) is actually running
+- Hooks must be configured — check `~/.claude/settings.json`
+- Start a new Claude Code session after Agent Desk is running (existing sessions won't appear until they fire a hook event)
+
+### Permission approval not working
+
+The `PermissionRequest` hook requires separate setup (not auto-configured). Add to `~/.claude/settings.json`:
+```json
+"PermissionRequest": [{ "hooks": [{ "type": "command", "command": "C:/path/to/agent-desk-hook.exe --event permission_request", "timeout": 86400 }] }]
+```
+
+### Source build: `cargo: command not found`
+
+Cargo isn't in the default bash PATH. Prefix your commands:
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo build --release
+```
+
+### Source build: file lock error during rebuild
+
+The running exe is locked by Windows. Kill it first:
+```bash
+taskkill /F /IM agent-desk.exe
+cd src-tauri && cargo build --release
+```
+
+### Port 15924 conflict with another application
+
+Edit `config/config.yaml` and change the `port` value under `manager`. Also update your hook binary's port flag:
+```json
+"command": "agent-desk-hook.exe --event stop --port 15925"
 ```
 
 ## Acknowledgments
