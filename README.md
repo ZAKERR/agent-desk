@@ -100,6 +100,10 @@ Hook events ──> agent-desk-hook.exe ──> HTTP API (port 15924)
                               └───────────────────────┘
 ```
 
+## Acknowledgments
+
+UI design inspired by [claude-island](https://github.com/farouqaldori/claude-island) by [@farouqaldori](https://github.com/farouqaldori).
+
 ## License
 
 MIT
