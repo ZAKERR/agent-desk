@@ -102,7 +102,8 @@ Hook events ──> agent-desk-hook.exe ──> HTTP API (port 15924)
 
 ## Acknowledgments
 
-UI design inspired by [claude-island](https://github.com/farouqaldori/claude-island) by [@farouqaldori](https://github.com/farouqaldori).
+- UI concept inspired by Apple's [Dynamic Island](https://support.apple.com/guide/iphone/use-the-dynamic-island-iph28f50d10d/ios)
+- Architecture design and technology choices referenced from [claude-island](https://github.com/farouqaldori/claude-island) by [@farouqaldori](https://github.com/farouqaldori)
 
 ## License
 
