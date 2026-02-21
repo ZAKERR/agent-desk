@@ -17,6 +17,7 @@ src-tauri/binaries/
 
 # Test screenshots (root level)
 *.png
+!image/*.png
 
 # Logs
 *.log
