@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -39,6 +40,12 @@ pub struct AppState {
     pub last_seen_ts: RwLock<f64>,
     pub permissions: PermissionStore,
     pub chat_reader: ChatReader,
+    pub current_hotkey: RwLock<String>,
+    pub live_sound_enabled: AtomicBool,
+    pub live_sound_stop: RwLock<String>,
+    pub live_sound_notification: RwLock<String>,
+    pub live_sound_permission: RwLock<String>,
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -55,6 +62,14 @@ impl AppState {
         let chat_reader = ChatReader::new();
         let (tx, rx) = std::sync::mpsc::channel();
 
+        let current_hotkey = RwLock::new(config.island.hotkey.clone());
+        let live_sound_enabled = AtomicBool::new(config.island.sound_enabled);
+        let live_sound_stop = RwLock::new(config.island.sound_stop.clone());
+        let live_sound_notification = RwLock::new(config.island.sound_notification.clone());
+        let live_sound_permission = RwLock::new(config.island.sound_permission.clone());
+
+        let http_client = reqwest::Client::new();
+
         (Self {
             config: Arc::new(config),
             event_store,
@@ -66,6 +81,12 @@ impl AppState {
             last_seen_ts: RwLock::new(0.0),
             permissions,
             chat_reader,
+            current_hotkey,
+            live_sound_enabled,
+            live_sound_stop,
+            live_sound_notification,
+            live_sound_permission,
+            http_client,
         }, rx)
     }
 }
@@ -121,6 +142,33 @@ pub async fn run_server(state: Arc<AppState>) {
         }
     });
 
+    // Background: purge ended sessions (every 300s)
+    let purge_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            let s = purge_state.clone();
+            let ttl = s.config.general.session_ttl;
+            let _ = tokio::task::spawn_blocking(move || {
+                s.session_tracker.purge_stale(ttl);
+            })
+            .await;
+        }
+    });
+
+    // Background: evict stale chat caches (every 600s)
+    let chat_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+            let s = chat_state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                s.chat_reader.evict_stale(std::time::Duration::from_secs(600));
+            })
+            .await;
+        }
+    });
+
     // CORS: allow tauri://localhost and browser origins to reach the API
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -142,6 +190,12 @@ pub async fn run_server(state: Arc<AppState>) {
         .route("/api/eval", post(api_eval))
         .route("/api/island/expand", post(api_island_expand))
         .route("/api/island/collapse", post(api_island_collapse))
+        .route("/api/island/pill-state", post(api_island_pill_state))
+        .route("/api/island/config", get(api_island_config))
+        .route("/api/island/hide", post(api_island_hide))
+        .route("/api/hotkey/capture", post(api_hotkey_capture))
+        .route("/api/hotkey/save", post(api_hotkey_save))
+        .route("/api/settings", get(api_settings_get).post(api_settings_save))
         .route("/api/permission-request", post(api_permission_request))
         .route("/api/permission-respond", post(api_permission_respond))
         .route("/api/permissions", get(api_permissions))
@@ -160,15 +214,26 @@ pub async fn run_server(state: Arc<AppState>) {
         .expect("HTTP server error");
 }
 
+// --- Atomic config write helper ---
+
+/// Write config file atomically: write to .tmp, then rename.
+fn atomic_write_config(path: &std::path::Path, content: &str) {
+    let tmp = path.with_extension("yaml.tmp");
+    if std::fs::write(&tmp, content).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 // --- Shared helpers ---
 
 pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
     let processes = state.registry.get_cached();
-    let tracked = state.session_tracker.get_active(86400);
+    let session_ttl = state.config.general.session_ttl;
+    let tracked = state.session_tracker.get_active(session_ttl);
 
     // Strategy: session tracker is the source of truth (CWD, status from hooks).
     // Process scanner provides PID/uptime/create_time.
-    // Match by CWD, fallback by recency.
+    // Match by CWD only — no greedy fallback.
 
     let mut matched_sessions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -190,23 +255,12 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
         let pcwd = proc.cwd.replace('/', "\\").to_lowercase();
         let pcwd_norm = pcwd.trim_end_matches('\\');
 
-        // Try CWD match
+        // CWD match only
         let tinfo = cwd_tracker.get(pcwd_norm).and_then(|entries| {
             entries.iter()
                 .filter(|e| !matched_sessions.contains(&e.session_id))
                 .max_by(|a, b| a.updated_at.partial_cmp(&b.updated_at).unwrap_or(std::cmp::Ordering::Equal))
                 .copied()
-        });
-
-        if let Some(info) = tinfo {
-            matched_sessions.insert(info.session_id.clone());
-        }
-
-        // Fallback: pair with unmatched tracker entries
-        let tinfo = tinfo.or_else(|| {
-            tracked.values()
-                .filter(|i| i.status != "ended" && !matched_sessions.contains(&i.session_id))
-                .max_by(|a, b| a.updated_at.partial_cmp(&b.updated_at).unwrap_or(std::cmp::Ordering::Equal))
         });
 
         if let Some(info) = tinfo {
@@ -509,7 +563,12 @@ async fn api_signal(
         level,
         cleared: false,
     };
-    state.event_store.append_event(evt);
+    {
+        let s = state.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            s.event_store.append_event(evt);
+        }).await;
+    }
 
     // --- 4. SSE broadcast ---
     state.sse.broadcast(
@@ -558,7 +617,13 @@ async fn api_signal(
             };
             if !title.is_empty() {
                 crate::tray::send_notification(handle, &title, &body);
-                crate::tray::play_notification_sound();
+                if state.live_sound_enabled.load(Ordering::Relaxed) {
+                    let st = match event {
+                        "stop" => state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone(),
+                        _ => state.live_sound_notification.read().unwrap_or_else(|e| e.into_inner()).clone(),
+                    };
+                    crate::tray::play_notification_sound(&st);
+                }
             }
         }
     }
@@ -566,9 +631,10 @@ async fn api_signal(
     // --- 7. Remote channels (async, fire-and-forget) ---
     // Arc::clone is cheap — no deep copy of Config
     let cfg = Arc::clone(&state.config);
+    let client = state.http_client.clone();
     let msg = message.clone();
     tokio::spawn(async move {
-        remote::dispatch_remote(&cfg.telegram, &cfg.dingtalk, &cfg.wechat, &msg).await;
+        remote::dispatch_remote(&cfg.telegram, &cfg.dingtalk, &cfg.wechat, &client, &msg).await;
     });
 
     Json(json!({ "ok": true }))
@@ -690,7 +756,12 @@ async fn api_island_expand(State(state): State<Arc<AppState>>) -> Json<Value> {
     if let Some(handle) = state.app_handle.get() {
         use tauri::Manager;
         if let Some(w) = handle.get_webview_window("island") {
-            crate::island::expand(&w);
+            let pw = state.config.island.panel_width;
+            let ph = state.config.island.panel_height;
+            // Animation takes ~200ms — run off the tokio thread
+            tokio::task::spawn_blocking(move || {
+                crate::island::expand(&w, pw, ph);
+            });
             return Json(json!({ "ok": true }));
         }
     }
@@ -701,7 +772,41 @@ async fn api_island_collapse(State(state): State<Arc<AppState>>) -> Json<Value> 
     if let Some(handle) = state.app_handle.get() {
         use tauri::Manager;
         if let Some(w) = handle.get_webview_window("island") {
-            crate::island::collapse(&w);
+            // Animation takes ~160ms — run off the tokio thread
+            tokio::task::spawn_blocking(move || {
+                crate::island::collapse(&w);
+            });
+            return Json(json!({ "ok": true }));
+        }
+    }
+    Json(json!({ "ok": false, "error": "no island window" }))
+}
+
+async fn api_island_pill_state(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let active = body.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Some(handle) = state.app_handle.get() {
+        use tauri::Manager;
+        if let Some(w) = handle.get_webview_window("island") {
+            let pill_w = state.config.island.pill_width;
+            let pill_w_active = state.config.island.pill_width_active;
+            // Animation takes ~150ms — run off the tokio thread
+            tokio::task::spawn_blocking(move || {
+                crate::island::set_pill_active(&w, active, pill_w, pill_w_active);
+            });
+            return Json(json!({ "ok": true }));
+        }
+    }
+    Json(json!({ "ok": false, "error": "no island window" }))
+}
+
+async fn api_island_hide(State(state): State<Arc<AppState>>) -> Json<Value> {
+    if let Some(handle) = state.app_handle.get() {
+        use tauri::Manager;
+        if let Some(w) = handle.get_webview_window("island") {
+            let _ = w.hide();
             return Json(json!({ "ok": true }));
         }
     }
@@ -747,10 +852,18 @@ async fn api_permission_request(
     if let Some(handle) = state.app_handle.get() {
         use tauri::Manager;
         if let Some(w) = handle.get_webview_window("island") {
-            crate::island::expand(&w);
+            let _ = w.show(); // Auto-show if hidden (permission needs user action)
             let _ = w.eval("if(window.onExpand)window.onExpand();fetchPermissions();");
+            let pw = state.config.island.panel_width;
+            let ph = state.config.island.panel_height;
+            tokio::task::spawn_blocking(move || {
+                crate::island::expand(&w, pw, ph);
+            });
         }
-        crate::tray::play_notification_sound();
+        if state.live_sound_enabled.load(Ordering::Relaxed) {
+            let st = state.live_sound_permission.read().unwrap_or_else(|e| e.into_inner()).clone();
+            crate::tray::play_notification_sound(&st);
+        }
     }
 
     // Long-poll: wait for decision (timeout 600s)
@@ -822,6 +935,169 @@ async fn api_permission_respond(
 async fn api_permissions(State(state): State<Arc<AppState>>) -> Json<Value> {
     let requests = state.permissions.get_pending();
     Json(json!({ "requests": requests }))
+}
+
+// ─── Hotkey settings endpoints ───────────────────────────
+
+/// Temporarily unregister hotkey so JS can capture key combos.
+async fn api_hotkey_capture(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let hotkey = state.current_hotkey.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(handle) = state.app_handle.get() {
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        if let Ok(s) = hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+            let _ = handle.global_shortcut().unregister(s);
+        }
+    }
+    Json(json!({ "ok": true, "hotkey": hotkey }))
+}
+
+/// Save new hotkey: register shortcut + write config file.
+async fn api_hotkey_save(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let new_hotkey = body.get("hotkey").and_then(|v| v.as_str()).unwrap_or("");
+    if new_hotkey.is_empty() {
+        return Json(json!({ "ok": false, "error": "no hotkey" }));
+    }
+
+    // Parse new shortcut
+    let new_shortcut = match new_hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        Ok(s) => s,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("Invalid hotkey: {}", e) })),
+    };
+
+    if let Some(handle) = state.app_handle.get() {
+        use tauri::Manager;
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let gs = handle.global_shortcut();
+
+        // Unregister old (might already be unregistered by capture)
+        let old = state.current_hotkey.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Ok(old_s) = old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+            let _ = gs.unregister(old_s);
+        }
+
+        // Register new
+        let reg = gs.on_shortcut(new_shortcut, |app, _shortcut, event| {
+            if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                if let Some(w) = app.get_webview_window("island") {
+                    crate::island::toggle_visibility(&w);
+                }
+            }
+        });
+
+        match reg {
+            Ok(_) => {
+                *state.current_hotkey.write().unwrap_or_else(|e| e.into_inner()) = new_hotkey.to_string();
+                // Write to config file (blocking I/O off tokio thread)
+                let hk = new_hotkey.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let path = crate::config::find_config_path();
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let new_content: String = content.lines().map(|line| {
+                            if line.trim_start().starts_with("hotkey:") {
+                                format!("  hotkey: \"{}\"", hk)
+                            } else {
+                                line.to_string()
+                            }
+                        }).collect::<Vec<_>>().join("\n");
+                        atomic_write_config(&path, &new_content);
+                    }
+                });
+                tracing::info!("Hotkey changed to: {}", new_hotkey);
+                return Json(json!({ "ok": true, "hotkey": new_hotkey }));
+            }
+            Err(e) => {
+                // Re-register old on failure
+                if let Ok(old_s) = old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                    let _ = gs.on_shortcut(old_s, |app, _shortcut, event| {
+                        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                            if let Some(w) = app.get_webview_window("island") {
+                                crate::island::toggle_visibility(&w);
+                            }
+                        }
+                    });
+                }
+                return Json(json!({ "ok": false, "error": format!("Failed: {}", e) }));
+            }
+        }
+    }
+    Json(json!({ "ok": false, "error": "no app handle" }))
+}
+
+// ─── General settings endpoints ─────────────────────────
+
+async fn api_settings_get(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let hotkey = state.current_hotkey.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let sound_enabled = state.live_sound_enabled.load(Ordering::Relaxed);
+    let sound_stop = state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let sound_notification = state.live_sound_notification.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let sound_permission = state.live_sound_permission.read().unwrap_or_else(|e| e.into_inner()).clone();
+    Json(json!({
+        "hotkey": hotkey,
+        "sound_enabled": sound_enabled,
+        "sound_stop": sound_stop,
+        "sound_notification": sound_notification,
+        "sound_permission": sound_permission,
+    }))
+}
+
+async fn api_settings_save(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    // Sound settings (live update)
+    if let Some(v) = body.get("sound_enabled").and_then(|v| v.as_bool()) {
+        state.live_sound_enabled.store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = body.get("sound_stop").and_then(|v| v.as_str()) {
+        *state.live_sound_stop.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+    }
+    if let Some(v) = body.get("sound_notification").and_then(|v| v.as_str()) {
+        *state.live_sound_notification.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+    }
+    if let Some(v) = body.get("sound_permission").and_then(|v| v.as_str()) {
+        *state.live_sound_permission.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+    }
+
+    // Write all changed fields to config.yaml (blocking I/O off tokio thread)
+    let body_clone = body.clone();
+    tokio::task::spawn_blocking(move || {
+        let path = crate::config::find_config_path();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let new_content: String = content.lines().map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("sound_enabled:") {
+                    if let Some(v) = body_clone.get("sound_enabled") {
+                        return format!("  sound_enabled: {}", v);
+                    }
+                } else if trimmed.starts_with("sound_stop:") {
+                    if let Some(v) = body_clone.get("sound_stop").and_then(|v| v.as_str()) {
+                        return format!("  sound_stop: \"{}\"", v);
+                    }
+                } else if trimmed.starts_with("sound_notification:") {
+                    if let Some(v) = body_clone.get("sound_notification").and_then(|v| v.as_str()) {
+                        return format!("  sound_notification: \"{}\"", v);
+                    }
+                } else if trimmed.starts_with("sound_permission:") {
+                    if let Some(v) = body_clone.get("sound_permission").and_then(|v| v.as_str()) {
+                        return format!("  sound_permission: \"{}\"", v);
+                    }
+                }
+                line.to_string()
+            }).collect::<Vec<_>>().join("\n");
+            atomic_write_config(&path, &new_content);
+        }
+    });
+
+    Json(json!({ "ok": true }))
+}
+
+// ─── Island config endpoint ─────────────────────────────
+
+async fn api_island_config(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(serde_json::to_value(&state.config.island).unwrap_or(json!({})))
 }
 
 // ─── Chat endpoint ──────────────────────────────────────

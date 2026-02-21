@@ -31,9 +31,4 @@ impl SSEBroadcaster {
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.tx.subscribe()
     }
-
-    /// Number of active receivers (approximate).
-    pub fn client_count(&self) -> usize {
-        self.tx.len()
-    }
 }

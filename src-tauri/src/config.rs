@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -15,6 +15,8 @@ pub struct Config {
     pub widget: WidgetConfig,
     #[serde(default)]
     pub general: GeneralConfig,
+    #[serde(default)]
+    pub island: IslandConfig,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -116,6 +118,104 @@ impl Default for GeneralConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IslandConfig {
+    // Sizes (pixels)
+    #[serde(default = "default_pill_width")]
+    pub pill_width: u32,
+    #[serde(default = "default_pill_width_active")]
+    pub pill_width_active: u32,
+    #[serde(default = "default_panel_width")]
+    pub panel_width: u32,
+    #[serde(default = "default_panel_height")]
+    pub panel_height: u32,
+
+    // Timing (milliseconds)
+    #[serde(default = "default_auto_collapse_ms")]
+    pub auto_collapse_ms: u64,
+    #[serde(default = "default_hover_expand_ms")]
+    pub hover_expand_ms: u64,
+    #[serde(default = "default_hover_collapse_ms")]
+    pub hover_collapse_ms: u64,
+
+    // Colors (CSS format)
+    #[serde(default = "default_background")]
+    pub background: String,
+    #[serde(default = "default_color_active")]
+    pub color_active: String,
+    #[serde(default = "default_color_ready")]
+    pub color_ready: String,
+    #[serde(default = "default_color_permission")]
+    pub color_permission: String,
+    #[serde(default = "default_color_notification")]
+    pub color_notification: String,
+
+    // Hotkey
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+
+    // Transparency
+    #[serde(default = "default_transparency")]
+    pub transparency: String,
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+
+    // Sound (per-event type)
+    #[serde(default = "default_true")]
+    pub sound_enabled: bool,
+    #[serde(default = "default_sound_stop")]
+    pub sound_stop: String,
+    #[serde(default = "default_sound_notification")]
+    pub sound_notification: String,
+    #[serde(default = "default_sound_permission")]
+    pub sound_permission: String,
+}
+
+impl Default for IslandConfig {
+    fn default() -> Self {
+        Self {
+            pill_width: 300,
+            pill_width_active: 360,
+            panel_width: 480,
+            panel_height: 320,
+            auto_collapse_ms: 3000,
+            hover_expand_ms: 400,
+            hover_collapse_ms: 300,
+            background: "#000000".into(),
+            color_active: "#D97857".into(),
+            color_ready: "#66BF73".into(),
+            color_permission: "#6699FF".into(),
+            color_notification: "#FFB300".into(),
+            hotkey: "Alt+D".into(),
+            transparency: "off".into(),
+            opacity: 0.75,
+            sound_enabled: true,
+            sound_stop: "asterisk".into(),
+            sound_notification: "exclamation".into(),
+            sound_permission: "question".into(),
+        }
+    }
+}
+
+fn default_hotkey() -> String { "Alt+D".into() }
+fn default_transparency() -> String { "off".into() }
+fn default_opacity() -> f64 { 0.75 }
+fn default_pill_width() -> u32 { 300 }
+fn default_pill_width_active() -> u32 { 360 }
+fn default_panel_width() -> u32 { 480 }
+fn default_panel_height() -> u32 { 320 }
+fn default_auto_collapse_ms() -> u64 { 3000 }
+fn default_hover_expand_ms() -> u64 { 400 }
+fn default_hover_collapse_ms() -> u64 { 300 }
+fn default_background() -> String { "#000000".into() }
+fn default_color_active() -> String { "#D97857".into() }
+fn default_color_ready() -> String { "#66BF73".into() }
+fn default_color_permission() -> String { "#6699FF".into() }
+fn default_color_notification() -> String { "#FFB300".into() }
+fn default_sound_stop() -> String { "asterisk".into() }
+fn default_sound_notification() -> String { "exclamation".into() }
+fn default_sound_permission() -> String { "question".into() }
+
 fn default_port() -> u16 { 15924 }
 fn default_true() -> bool { true }
 fn default_max_events_age() -> u64 { 86400 }
@@ -162,11 +262,12 @@ impl Default for Config {
             manager: ManagerConfig::default(),
             widget: WidgetConfig::default(),
             general: GeneralConfig::default(),
+            island: IslandConfig::default(),
         }
     }
 }
 
-fn find_config_path() -> PathBuf {
+pub fn find_config_path() -> PathBuf {
     // Check next to executable first
     let exe_dir = app_dir();
     let candidate = exe_dir.join("config").join("config.yaml");
@@ -181,6 +282,14 @@ fn find_config_path() -> PathBuf {
         return candidate;
     }
 
-    // Default path
+    // Check %APPDATA%/agent-desk/config.yaml
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let candidate = PathBuf::from(appdata).join("agent-desk").join("config.yaml");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Default path (CWD-based)
     candidate
 }

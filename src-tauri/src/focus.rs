@@ -20,9 +20,12 @@ const NON_TERMINAL_PROCESSES: &[&str] = &[
 pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessInfo], pid: Option<u32>) -> bool {
     #[cfg(windows)]
     {
+        // Single Toolhelp32 snapshot for all process-tree walks
+        let snapshot = ProcessSnapshot::capture();
+
         if !cwd.is_empty() {
             // Strategy 1: for each agent process, walk up to terminal, check title matches CWD
-            if let Some(hwnd) = find_terminal_for_cwd(cwd, cached_processes) {
+            if let Some(hwnd) = find_terminal_for_cwd(cwd, cached_processes, &snapshot) {
                 return focus_hwnd(hwnd);
             }
 
@@ -34,7 +37,7 @@ pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessIn
 
         // Strategy 3: direct PID walk (if caller provides a known-good PID)
         if let Some(p) = pid {
-            if let Some(hwnd) = walk_to_terminal(p) {
+            if let Some(hwnd) = walk_to_terminal(&snapshot, p) {
                 return focus_hwnd(hwnd);
             }
         }
@@ -44,17 +47,69 @@ pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessIn
     false
 }
 
+/// Cached Toolhelp32 process snapshot — avoids creating one per walk level.
+#[cfg(windows)]
+struct ProcessSnapshot {
+    /// (pid, parent_pid, exe_name)
+    entries: Vec<(u32, u32, String)>,
+}
+
+#[cfg(windows)]
+impl ProcessSnapshot {
+    fn capture() -> Self {
+        use windows::Win32::System::Diagnostics::ToolHelp::*;
+        use windows::Win32::Foundation::CloseHandle;
+
+        let mut entries = Vec::new();
+        unsafe {
+            let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                Ok(h) => h,
+                Err(_) => return Self { entries },
+            };
+            let mut entry = PROCESSENTRY32W::default();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let name = String::from_utf16_lossy(
+                        &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len())]
+                    );
+                    entries.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+        Self { entries }
+    }
+
+    /// Get parent PID and parent's exe name for a given PID.
+    fn get_parent_info(&self, pid: u32) -> Option<(u32, &str)> {
+        let parent_pid = self.entries.iter()
+            .find(|(p, _, _)| *p == pid)
+            .map(|(_, pp, _)| *pp)
+            .filter(|&pp| pp != 0 && pp != pid)?;
+        let parent_name = self.entries.iter()
+            .find(|(p, _, _)| *p == parent_pid)
+            .map(|(_, _, n)| n.as_str())
+            .unwrap_or("");
+        Some((parent_pid, parent_name))
+    }
+}
+
 /// For each agent process, walk up to find its terminal window,
 /// then check if the terminal's title contains the target CWD.
 #[cfg(windows)]
-fn find_terminal_for_cwd(cwd: &str, cached: &[ProcessInfo]) -> Option<isize> {
+fn find_terminal_for_cwd(cwd: &str, cached: &[ProcessInfo], snapshot: &ProcessSnapshot) -> Option<isize> {
     let cwd_lower = cwd.replace('/', "\\").to_lowercase();
     let cwd_fwd = cwd.replace('\\', "/").to_lowercase();
     let basename = cwd.rsplit(&['/', '\\']).next().unwrap_or("").to_lowercase();
     let variants = vec![cwd_lower.clone(), cwd_fwd, basename.clone()];
 
     for proc in cached {
-        if let Some(hwnd) = walk_to_terminal(proc.pid) {
+        if let Some(hwnd) = walk_to_terminal(snapshot, proc.pid) {
             // Got the terminal window — check if its title contains the CWD
             let title = get_window_title(hwnd);
             let title_lower = title.to_lowercase();
@@ -83,13 +138,12 @@ fn get_window_title(hwnd: isize) -> String {
 }
 
 #[cfg(windows)]
-fn walk_to_terminal(pid: u32) -> Option<isize> {
+fn walk_to_terminal(snapshot: &ProcessSnapshot, pid: u32) -> Option<isize> {
     let mut current_pid = pid;
     tracing::debug!("walk_to_terminal: starting from PID {}", pid);
 
     for level in 0..6 {
-        let parent_pid = get_parent_pid(current_pid)?;
-        let parent_name = get_process_name_by_pid(parent_pid);
+        let (parent_pid, parent_name) = snapshot.get_parent_info(current_pid)?;
         let parent_lower = parent_name.to_lowercase();
         tracing::debug!("  level {}: PID {} → parent PID {} ({})", level, current_pid, parent_pid, parent_name);
 
@@ -202,65 +256,6 @@ fn get_process_create_time(pid: u32) -> u64 {
         } else {
             0
         }
-    }
-}
-
-#[cfg(windows)]
-fn get_parent_pid(pid: u32) -> Option<u32> {
-    use windows::Win32::System::Diagnostics::ToolHelp::*;
-    use windows::Win32::Foundation::CloseHandle;
-
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        let mut entry = PROCESSENTRY32W::default();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
-            loop {
-                if entry.th32ProcessID == pid {
-                    let parent = entry.th32ParentProcessID;
-                    let _ = CloseHandle(snapshot);
-                    return if parent != 0 && parent != pid { Some(parent) } else { None };
-                }
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-        let _ = CloseHandle(snapshot);
-        None
-    }
-}
-
-#[cfg(windows)]
-fn get_process_name_by_pid(pid: u32) -> String {
-    use windows::Win32::System::Diagnostics::ToolHelp::*;
-    use windows::Win32::Foundation::CloseHandle;
-
-    unsafe {
-        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-            Ok(h) => h,
-            Err(_) => return String::new(),
-        };
-        let mut entry = PROCESSENTRY32W::default();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
-            loop {
-                if entry.th32ProcessID == pid {
-                    let name = String::from_utf16_lossy(
-                        &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len())]
-                    );
-                    let _ = CloseHandle(snapshot);
-                    return name;
-                }
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-        let _ = CloseHandle(snapshot);
-        String::new()
     }
 }
 

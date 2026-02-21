@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -37,6 +39,9 @@ static MENU_GEN: AtomicU64 = AtomicU64::new(0);
 /// Session-click mapping: menu-item ID → (CWD, PID).
 static SESSION_MAP: LazyLock<Mutex<HashMap<String, (String, Option<u32>)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Last hash of tray menu content — skip rebuild if unchanged.
+static LAST_TRAY_HASH: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
 
 // ---------------------------------------------------------------------------
 // Icon generation
@@ -136,6 +141,9 @@ pub fn setup_tray(
     let initial_icon = ICONS.get("sleeping").unwrap();
     let icon = tauri::image::Image::new(initial_icon, ICON_SIZE, ICON_SIZE);
 
+    let panel_w = state.config.island.panel_width;
+    let panel_h = state.config.island.panel_height;
+
     let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
         .menu(&menu)
@@ -159,11 +167,14 @@ pub fn setup_tray(
                 let prev = LAST_TOGGLE.swap(now, AtOrd::Relaxed);
                 if now.saturating_sub(prev) < 400 { return; }
 
-                // Left click → expand island
+                // Left click → show (if hidden) + expand island (non-blocking)
                 let app = tray.app_handle();
                 if let Some(w) = app.get_webview_window("island") {
-                    crate::island::expand(&w);
+                    let _ = w.show();
                     let _ = w.eval("if(window.onExpand)window.onExpand()");
+                    std::thread::spawn(move || {
+                        crate::island::expand(&w, panel_w, panel_h);
+                    });
                 }
             }
         })
@@ -174,6 +185,11 @@ pub fn setup_tray(
             if let Some((cwd, pid)) = SESSION_MAP.lock().unwrap().get(id).cloned() {
                 let cached = state.registry.get_cached();
                 focus::find_and_focus_terminal_with_pid(&cwd, &cached, pid);
+            } else if id.starts_with("show_") {
+                use tauri::Manager;
+                if let Some(w) = app.get_webview_window("island") {
+                    let _ = w.show();
+                }
             } else if id.starts_with("clear_") {
                 state.event_store.clear_all();
                 state.sse.broadcast("clear", serde_json::json!({}));
@@ -248,12 +264,37 @@ pub fn update_tray(
     };
     let _ = tray.set_tooltip(Some(&tooltip));
 
-    // 3. Menu
-    match build_menu(handle, state, state_str, processes) {
-        Ok(menu) => {
-            let _ = tray.set_menu(Some(menu));
+    // 3. Menu — skip rebuild if content hash unchanged
+    let mut hasher = DefaultHasher::new();
+    state_str.hash(&mut hasher);
+    unread.hash(&mut hasher);
+    for p in processes {
+        if let Some(obj) = p.as_object() {
+            if let Some(v) = obj.get("pid") { v.to_string().hash(&mut hasher); }
+            if let Some(v) = obj.get("status") { v.to_string().hash(&mut hasher); }
+            if let Some(v) = obj.get("cwd") { v.to_string().hash(&mut hasher); }
+            if let Some(v) = obj.get("notification_type") { v.to_string().hash(&mut hasher); }
         }
-        Err(e) => tracing::error!("Failed to build tray menu: {}", e),
+    }
+    let new_hash = hasher.finish();
+
+    let should_rebuild = {
+        let mut last = LAST_TRAY_HASH.lock().unwrap_or_else(|e| e.into_inner());
+        if *last == new_hash {
+            false
+        } else {
+            *last = new_hash;
+            true
+        }
+    };
+
+    if should_rebuild {
+        match build_menu(handle, state, state_str, processes) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(e) => tracing::error!("Failed to build tray menu: {}", e),
+        }
     }
 }
 
@@ -323,7 +364,7 @@ fn build_menu(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let events = state.event_store.get_events(now - 86400.0);
+    let events = state.event_store.get_events(now - state.config.general.session_ttl as f64);
     let recent: Vec<_> = events.iter().rev().take(5).collect();
 
     if !recent.is_empty() {
@@ -349,6 +390,11 @@ fn build_menu(
 
     // ── Bottom ──
     menu.append(&PredefinedMenuItem::separator(handle)?)?;
+    menu.append(&MenuItem::with_id(
+        handle, format!("show_{}", seq),
+        "\u{1f441} \u{663e}\u{793a}\u{7a97}\u{53e3}",
+        true, None::<&str>,
+    )?)?;
     menu.append(&MenuItem::with_id(
         handle, format!("clear_{}", seq),
         "\u{1f9f9} \u{6e05}\u{7406}\u{52a8}\u{6001}",
@@ -378,16 +424,28 @@ pub fn send_notification(handle: &AppHandle, title: &str, body: &str) {
 }
 
 /// Play a system notification sound via Win32 MessageBeep.
-pub fn play_notification_sound() {
+///
+/// `sound_type`: "asterisk" | "hand" | "question" | "exclamation" | "default"
+pub fn play_notification_sound(sound_type: &str) {
     #[cfg(windows)]
     {
         #[link(name = "user32")]
         unsafe extern "system" {
             fn MessageBeep(uType: u32) -> i32;
         }
-        const MB_ICONASTERISK: u32 = 0x00000040;
+        let code = match sound_type {
+            "hand"        => 0x00000010,
+            "question"    => 0x00000020,
+            "exclamation" => 0x00000030,
+            "asterisk"    => 0x00000040,
+            _             => 0x00000000, // "default" or unknown
+        };
         unsafe {
-            MessageBeep(MB_ICONASTERISK);
+            MessageBeep(code);
         }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = sound_type;
     }
 }

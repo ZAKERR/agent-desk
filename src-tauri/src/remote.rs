@@ -4,7 +4,7 @@ use base64::Engine as _;
 use crate::config::{DingTalkConfig, TelegramConfig, WeChatConfig};
 
 /// Send a message to Telegram bot.
-pub async fn send_telegram(config: &TelegramConfig, message: &str) {
+pub async fn send_telegram(config: &TelegramConfig, client: &reqwest::Client, message: &str) {
     if !config.enabled || config.bot_token.is_empty() || config.chat_id.is_empty() {
         return;
     }
@@ -13,7 +13,6 @@ pub async fn send_telegram(config: &TelegramConfig, message: &str) {
         "https://api.telegram.org/bot{}/sendMessage",
         config.bot_token
     );
-    let client = reqwest::Client::new();
     let res = client
         .post(&url)
         .json(&serde_json::json!({
@@ -30,7 +29,7 @@ pub async fn send_telegram(config: &TelegramConfig, message: &str) {
 }
 
 /// Send a message to DingTalk webhook.
-pub async fn send_dingtalk(config: &DingTalkConfig, message: &str) {
+pub async fn send_dingtalk(config: &DingTalkConfig, client: &reqwest::Client, message: &str) {
     if !config.enabled || config.access_token.is_empty() {
         return;
     }
@@ -62,7 +61,6 @@ pub async fn send_dingtalk(config: &DingTalkConfig, message: &str) {
         webhook, config.access_token, timestamp, sign
     );
 
-    let client = reqwest::Client::new();
     let res = client
         .post(&url)
         .json(&serde_json::json!({
@@ -79,12 +77,11 @@ pub async fn send_dingtalk(config: &DingTalkConfig, message: &str) {
 }
 
 /// Send a message to WeChat (PushPlus or ServerChan).
-pub async fn send_wechat(config: &WeChatConfig, message: &str) {
+pub async fn send_wechat(config: &WeChatConfig, client: &reqwest::Client, message: &str) {
     if !config.enabled {
         return;
     }
 
-    let client = reqwest::Client::new();
     let provider = if config.provider.is_empty() {
         "pushplus"
     } else {
@@ -138,11 +135,12 @@ pub async fn dispatch_remote(
     telegram: &TelegramConfig,
     dingtalk: &DingTalkConfig,
     wechat: &WeChatConfig,
+    client: &reqwest::Client,
     message: &str,
 ) {
     tokio::join!(
-        send_telegram(telegram, message),
-        send_dingtalk(dingtalk, message),
-        send_wechat(wechat, message),
+        send_telegram(telegram, client, message),
+        send_dingtalk(dingtalk, client, message),
+        send_wechat(wechat, client, message),
     );
 }

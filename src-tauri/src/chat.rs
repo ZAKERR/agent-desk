@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
@@ -33,6 +34,7 @@ struct SessionCache {
     messages: Vec<ChatMessage>,
     /// UUID → index in messages vec (for dedup of streaming updates)
     uuid_index: HashMap<String, usize>,
+    last_accessed: Instant,
 }
 
 pub struct ChatReader {
@@ -60,12 +62,14 @@ impl ChatReader {
         }
 
         let cache_key = format!("{}:{}", session_id, cwd);
-        let mut cache_map = self.cache.lock().unwrap();
+        let mut cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         let entry = cache_map.entry(cache_key).or_insert_with(|| SessionCache {
             offset: 0,
             messages: Vec::new(),
             uuid_index: HashMap::new(),
+            last_accessed: Instant::now(),
         });
+        entry.last_accessed = Instant::now();
 
         // Read new lines from file
         if let Ok(mut file) = File::open(&path) {
@@ -110,6 +114,13 @@ impl ChatReader {
 
         let slice = entry.messages[after..].to_vec();
         (slice, total)
+    }
+
+    /// Evict session caches not accessed within `max_age`.
+    pub fn evict_stale(&self, max_age: Duration) {
+        let mut cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = Instant::now() - max_age;
+        cache_map.retain(|_, entry| entry.last_accessed >= cutoff);
     }
 }
 

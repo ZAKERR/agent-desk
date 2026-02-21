@@ -77,7 +77,7 @@ impl SessionTracker {
             notification_message: None,
             agent_pid,
         };
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.insert(session_id.to_string(), info);
         self.dirty.store(true, Ordering::Relaxed);
     }
@@ -85,7 +85,7 @@ impl SessionTracker {
     /// Update session fields.
     pub fn update(&self, session_id: &str, updates: SessionUpdate) {
         let now = now_ts();
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let entry = sessions.entry(session_id.to_string()).or_insert_with(|| {
             SessionInfo {
                 session_id: session_id.to_string(),
@@ -127,7 +127,7 @@ impl SessionTracker {
     pub fn get_active(&self, ttl: u64) -> HashMap<String, SessionInfo> {
         let now = now_ts();
         let cutoff = now - ttl as f64;
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.iter()
             .filter(|(_, info)| info.updated_at >= cutoff)
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -136,7 +136,7 @@ impl SessionTracker {
 
     /// Resolve a short ID prefix to full session ID.
     pub fn resolve_short_id(&self, prefix: &str) -> Option<String> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         let matches: Vec<&String> = sessions.keys()
             .filter(|k| k.starts_with(prefix))
             .collect();
@@ -149,8 +149,22 @@ impl SessionTracker {
 
     /// Remove a session by ID.
     pub fn remove(&self, session_id: &str) {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if sessions.remove(session_id).is_some() {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Purge sessions that ended more than `ttl` seconds ago.
+    pub fn purge_stale(&self, ttl: u64) {
+        let now = now_ts();
+        let cutoff = now - ttl as f64;
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let before = sessions.len();
+        sessions.retain(|_, info| {
+            !(info.status == "ended" && info.updated_at < cutoff)
+        });
+        if sessions.len() < before {
             self.dirty.store(true, Ordering::Relaxed);
         }
     }
@@ -160,7 +174,7 @@ impl SessionTracker {
         if !self.dirty.swap(false, Ordering::Relaxed) {
             return;
         }
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         let json = serde_json::to_string_pretty(&*sessions).unwrap_or_default();
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
