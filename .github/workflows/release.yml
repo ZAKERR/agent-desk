@@ -45,10 +45,27 @@ jobs:
           releaseBody: |
             ## Install
 
-            Download and run the `.msi` or `-setup.exe` installer.
-            Hooks are auto-configured on first launch — no manual setup needed.
+            **只需下载一个安装包，安装即可用：**
 
-            > Standalone hook binary is also attached for source-build users.
+            | File | Description |
+            |------|-------------|
+            | `.msi` | Windows 标准安装包（推荐） |
+            | `-setup.exe` | NSIS 安装包（备选） |
+
+            1. 下载上方任意一个安装包
+            2. 双击安装
+            3. 启动 Agent Desk
+
+            首次启动会自动配置 Claude Code hooks（写入 `~/.claude/settings.json`），**无需任何手动配置**。
+
+            ---
+
+            <details>
+            <summary>从源码编译的用户</summary>
+
+            `agent-desk-hook.exe` 是 hook 转发程序，已内置在安装包中。
+            如果你从源码编译，请单独下载此文件放到主程序同目录下，或参考 [Build from Source](https://github.com/ZAKERR/agent-desk#option-b-build-from-source)。
+            </details>
           releaseDraft: false
           prerelease: false
 
