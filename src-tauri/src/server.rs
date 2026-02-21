@@ -271,7 +271,8 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
         let status = match tracker_status {
             "waiting" | "idle" => "waiting",
             "stopped" | "ended" => "stopped",
-            _ => "active",
+            "active" => "active",
+            _ => "waiting", // no tracker match or unknown → show as ready
         };
 
         let display_cwd = tinfo
@@ -1034,12 +1035,19 @@ async fn api_settings_get(State(state): State<Arc<AppState>>) -> Json<Value> {
     let sound_stop = state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone();
     let sound_notification = state.live_sound_notification.read().unwrap_or_else(|e| e.into_inner()).clone();
     let sound_permission = state.live_sound_permission.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let autostart = state.app_handle.get()
+        .and_then(|h| {
+            use tauri_plugin_autostart::ManagerExt;
+            h.autolaunch().is_enabled().ok()
+        })
+        .unwrap_or(false);
     Json(json!({
         "hotkey": hotkey,
         "sound_enabled": sound_enabled,
         "sound_stop": sound_stop,
         "sound_notification": sound_notification,
         "sound_permission": sound_permission,
+        "autostart": autostart,
     }))
 }
 
@@ -1059,6 +1067,15 @@ async fn api_settings_save(
     }
     if let Some(v) = body.get("sound_permission").and_then(|v| v.as_str()) {
         *state.live_sound_permission.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+    }
+
+    // Autostart toggle via plugin
+    if let Some(v) = body.get("autostart").and_then(|v| v.as_bool()) {
+        if let Some(handle) = state.app_handle.get() {
+            use tauri_plugin_autostart::ManagerExt;
+            let al = handle.autolaunch();
+            if v { let _ = al.enable(); } else { let _ = al.disable(); }
+        }
     }
 
     // Write all changed fields to config.yaml (blocking I/O off tokio thread)
@@ -1083,6 +1100,10 @@ async fn api_settings_save(
                 } else if trimmed.starts_with("sound_permission:") {
                     if let Some(v) = body_clone.get("sound_permission").and_then(|v| v.as_str()) {
                         return format!("  sound_permission: \"{}\"", v);
+                    }
+                } else if trimmed.starts_with("autostart:") {
+                    if let Some(v) = body_clone.get("autostart") {
+                        return format!("  autostart: {}", v);
                     }
                 }
                 line.to_string()

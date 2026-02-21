@@ -45,9 +45,25 @@ pub fn run() {
     // Build Tauri app
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(move |app| {
             // Store AppHandle for notifications from api_signal
             let _ = state.app_handle.set(app.handle().clone());
+
+            // Sync OS autostart state to config
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let al = app.autolaunch();
+                if state.config.island.autostart {
+                    let _ = al.enable();
+                } else {
+                    let _ = al.disable();
+                }
+            }
 
             // Setup system tray
             tray::setup_tray(app, state.clone())?;
@@ -56,7 +72,30 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("island") {
                 let _ = w.eval(&format!("window.API_PORT={}", port));
                 let _ = w.set_skip_taskbar(true);
-                island::setup(&w);
+
+                island::setup(&w, state.config.island.pill_width);
+            }
+
+            // Register global hotkey to toggle island visibility
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                let hotkey_str = state.config.island.hotkey.clone();
+                match hotkey_str.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                    Ok(shortcut) => {
+                        let reg = app.global_shortcut().on_shortcut(shortcut, |app, _shortcut, event| {
+                            if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                                if let Some(w) = app.get_webview_window("island") {
+                                    island::toggle_visibility(&w);
+                                }
+                            }
+                        });
+                        match reg {
+                            Ok(_) => tracing::info!("Global hotkey registered: {}", hotkey_str),
+                            Err(e) => tracing::warn!("Failed to register hotkey '{}': {}", hotkey_str, e),
+                        }
+                    }
+                    Err(e) => tracing::warn!("Invalid hotkey '{}': {}", hotkey_str, e),
+                }
             }
 
             // Tray updater thread: refreshes icon, tooltip, and menu

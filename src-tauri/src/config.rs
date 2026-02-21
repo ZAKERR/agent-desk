@@ -169,6 +169,10 @@ pub struct IslandConfig {
     pub sound_notification: String,
     #[serde(default = "default_sound_permission")]
     pub sound_permission: String,
+
+    // Autostart
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 impl Default for IslandConfig {
@@ -193,6 +197,7 @@ impl Default for IslandConfig {
             sound_stop: "asterisk".into(),
             sound_notification: "exclamation".into(),
             sound_permission: "question".into(),
+            autostart: false,
         }
     }
 }

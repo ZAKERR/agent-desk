@@ -3,9 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <style>
+:root {
+  --bg: #000000;
+  --color-active: #D97857;
+  --color-ready: #66BF73;
+  --color-permission: #6699FF;
+  --color-notification: #FFB300;
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
-  background: #000;
+  background: var(--bg);
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -21,7 +28,7 @@ html, body {
   height: 36px;
   padding: 0 14px;
   cursor: pointer;
-  background: #000;
+  background: var(--bg);
 }
 #pill.hide { display: none; }
 
@@ -34,7 +41,7 @@ html, body {
 #pill-q {
   font-size: 14px;
   font-weight: 600;
-  color: #D97857;
+  color: var(--color-active);
   display: none;
 }
 
@@ -57,10 +64,28 @@ html, body {
   align-items: center;
   flex-shrink: 0;
 }
+#pill-hide {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  color: rgba(255,255,255,0.15);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.12s;
+  margin-left: 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+#pill:hover #pill-hide { opacity: 1; }
+#pill-hide:hover { color: rgba(255,255,255,0.5); background: rgba(255,255,255,0.08); }
 .pill-spin {
   font-size: 12px;
   font-weight: bold;
-  color: #D97857;
+  color: var(--color-active);
   width: 12px;
   text-align: center;
 }
@@ -75,7 +100,7 @@ html, body {
   display: none;
   flex-direction: column;
   height: 100vh;
-  background: #000;
+  background: var(--bg);
 }
 #panel.show { display: flex; }
 
@@ -112,6 +137,22 @@ html, body {
   background: none;
 }
 #header-menu:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.08); }
+#header-hide {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: rgba(255,255,255,0.3);
+  font-size: 14px;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+}
+#header-hide:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.08); }
 
 /* ─── Content ─── */
 #content {
@@ -172,7 +213,7 @@ html, body {
   margin-top: 1px;
 }
 .tool-name {
-  color: #66BF73;
+  color: var(--color-ready);
   font-weight: 500;
   font-family: 'Cascadia Code', 'Consolas', monospace;
 }
@@ -226,6 +267,77 @@ html, body {
   font-size: 11px;
 }
 
+/* ─── Settings ─── */
+#settings {
+  display: none;
+  padding: 12px 10px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 8px;
+  border-radius: 10px;
+  margin-bottom: 4px;
+}
+.settings-label {
+  font-size: 12px;
+  color: rgba(255,255,255,0.6);
+}
+.hotkey-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.85);
+  font-size: 12px;
+  font-family: 'Cascadia Code','Consolas',monospace;
+  cursor: pointer;
+  transition: background 0.15s;
+  border: 1px solid transparent;
+  min-width: 80px;
+  text-align: center;
+}
+.hotkey-box:hover { background: rgba(255,255,255,0.12); }
+.toggle-box {
+  padding: 4px 14px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  text-align: center;
+  min-width: 44px;
+}
+.toggle-box.on { background: var(--color-ready); color: #000; }
+.toggle-box.off { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.4); }
+.select-box {
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.85);
+  font-size: 11px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  border: 1px solid transparent;
+  cursor: pointer;
+  outline: none;
+}
+.select-box option { background: #1a1a1a; color: #ddd; }
+.hotkey-box.capturing {
+  border-color: var(--color-active);
+  color: var(--color-active);
+  animation: capPulse 1s ease-in-out infinite;
+}
+@keyframes capPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 8px 0;
+}
+
 /* No fadeIn animation — innerHTML rebuild would re-trigger it causing flicker */
 </style>
 </head>
@@ -239,6 +351,7 @@ html, body {
   </div>
   <div id="pill-center"></div>
   <div id="pill-right"></div>
+  <div id="pill-hide" onclick="event.stopPropagation();hideIsland()" title="Hide">&minus;</div>
 </div>
 
 <!-- Panel (expanded) -->
@@ -247,10 +360,59 @@ html, body {
     <div id="header-crab"></div>
     <div id="header-spacer"></div>
     <div id="header-activity"></div>
+    <button id="header-hide" onclick="hideIsland()" title="Hide">&minus;</button>
     <button id="header-menu">&#x2630;</button>
   </div>
   <div id="content">
     <div id="sessions"></div>
+    <div id="settings">
+      <div class="settings-row">
+        <span class="settings-label">Hotkey</span>
+        <div id="hotkey-box" class="hotkey-box" onclick="startCapture()">Alt+D</div>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Autostart</span>
+        <div id="autostart-toggle" class="toggle-box off" onclick="toggleAutostart()">OFF</div>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Sound</span>
+        <div id="sound-toggle" class="toggle-box on" onclick="toggleSound()">ON</div>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Complete</span>
+        <select id="sound-stop" class="select-box">
+          <option value="asterisk">Asterisk</option>
+          <option value="hand">Hand</option>
+          <option value="question">Question</option>
+          <option value="exclamation">Exclamation</option>
+          <option value="default">Default</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Input</span>
+        <select id="sound-notification" class="select-box">
+          <option value="asterisk">Asterisk</option>
+          <option value="hand">Hand</option>
+          <option value="question">Question</option>
+          <option value="exclamation">Exclamation</option>
+          <option value="default">Default</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <span class="settings-label">Permission</span>
+        <select id="sound-permission" class="select-box">
+          <option value="asterisk">Asterisk</option>
+          <option value="hand">Hand</option>
+          <option value="question">Question</option>
+          <option value="exclamation">Exclamation</option>
+          <option value="default">Default</option>
+        </select>
+      </div>
+      <div class="settings-actions">
+        <button class="perm-btn deny" onclick="cancelSettings()">Cancel</button>
+        <button class="perm-btn allow" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -258,8 +420,24 @@ html, body {
 const API_PORT = window.API_PORT || 15924;
 const BASE = `http://127.0.0.1:${API_PORT}`;
 
-// ─── Colors ──────────────────────────────────
-const C = { orange: '#D97857', green: '#66BF73', blue: '#6699FF' };
+// ─── Config (fetched from backend, with JS defaults as fallback) ──
+let CFG = {};
+async function loadConfig() {
+  try { CFG = await (await fetch(`${BASE}/api/island/config`)).json(); } catch(e) {}
+  CFG.background         = CFG.background         || '#000000';
+  CFG.color_active       = CFG.color_active       || '#D97857';
+  CFG.color_ready        = CFG.color_ready         || '#66BF73';
+  CFG.color_permission   = CFG.color_permission   || '#6699FF';
+  CFG.color_notification = CFG.color_notification || '#FFB300';
+  CFG.auto_collapse_ms   = CFG.auto_collapse_ms   || 3000;
+  CFG.hover_expand_ms    = CFG.hover_expand_ms    || 400;
+  CFG.hover_collapse_ms  = CFG.hover_collapse_ms  || 300;
+  CFG.transparency       = CFG.transparency       || 'off';
+  CFG.opacity            = (CFG.opacity !== undefined && CFG.opacity !== null) ? CFG.opacity : 0.75;
+}
+
+// ─── Colors (read from CFG) ──────────────────
+const C = { get orange() { return CFG.color_active || '#D97857'; }, get green() { return CFG.color_ready || '#66BF73'; }, get blue() { return CFG.color_permission || '#6699FF'; } };
 
 // ─── Pixel crab SVG ──────────────────────────
 function crabSvg(size) {
@@ -291,6 +469,7 @@ let hoverTimer = null;
 let leaveTimer = null;
 let autoCloseTimer = null;
 let lastSH = '', lastPH = '';
+let pillActive = false; // tracks pill width state (idle=narrow, active=wide)
 
 // ─── Helpers ─────────────────────────────────
 const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -298,7 +477,7 @@ const trn = (s, n) => s.length > n ? s.slice(0, n - 1) + '\u2026' : s;
 const proj = c => (c || '').split(/[/\\]/).pop() || '???';
 
 // ─── Expand / Collapse ──────────────────────
-// autoClose: true = hook-triggered, auto-collapse after 3s
+// autoClose: true = hook-triggered, auto-collapse after configured ms
 function doExpand(autoClose) {
   if (isExpanded) return;
   isExpanded = true;
@@ -309,7 +488,7 @@ function doExpand(autoClose) {
   markRead();
   if (autoClose) {
     if (autoCloseTimer) clearTimeout(autoCloseTimer);
-    autoCloseTimer = setTimeout(doCollapse, 3000);
+    autoCloseTimer = setTimeout(doCollapse, CFG.auto_collapse_ms || 3000);
   }
 }
 function doCollapse() {
@@ -322,9 +501,9 @@ function doCollapse() {
 }
 
 document.getElementById('pill').addEventListener('click', () => doExpand(false));
-document.getElementById('pill').addEventListener('mouseenter', () => { hoverTimer = setTimeout(() => doExpand(false), 400); });
+document.getElementById('pill').addEventListener('mouseenter', () => { hoverTimer = setTimeout(() => doExpand(false), CFG.hover_expand_ms || 400); });
 document.getElementById('pill').addEventListener('mouseleave', () => { if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; } });
-document.addEventListener('mouseleave', () => { if (!isExpanded) return; leaveTimer = setTimeout(doCollapse, 300); });
+document.addEventListener('mouseleave', () => { if (!isExpanded) return; leaveTimer = setTimeout(doCollapse, CFG.hover_collapse_ms || 300); });
 document.addEventListener('mouseenter', () => {
   if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
   // User moved mouse into panel → cancel auto-close (wants to interact)
@@ -332,6 +511,11 @@ document.addEventListener('mouseenter', () => {
 });
 // Window blur (click outside / alt-tab) → collapse immediately
 window.addEventListener('blur', () => { if (isExpanded) doCollapse(); });
+
+function hideIsland() {
+  if (isExpanded) doCollapse();
+  fetch(`${BASE}/api/island/hide`, { method: 'POST' }).catch(() => {});
+}
 
 window.onExpand = () => doExpand(false);
 window.onTrayState = function() {};
@@ -341,6 +525,21 @@ let mrTimer = null;
 function markRead() {
   if (mrTimer) return;
   mrTimer = setTimeout(() => { mrTimer = null; fetch(`${BASE}/api/mark_read`, { method: 'POST' }).catch(() => {}); }, 500);
+}
+
+// ─── Pill width animation (idle ↔ active) ──
+function checkPillState() {
+  const hasActive = sessions.some(s => s.status === 'active');
+  const hasPerm = perms.length > 0;
+  const shouldBeActive = hasActive || hasPerm;
+  if (shouldBeActive !== pillActive) {
+    pillActive = shouldBeActive;
+    fetch(`${BASE}/api/island/pill-state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: shouldBeActive })
+    }).catch(() => {});
+  }
 }
 
 // ─── Pill ───────────────────────────────────
@@ -397,6 +596,7 @@ function updateHeader() {
 
 // ─── Sessions ───────────────────────────────
 function renderSessions() {
+  checkPillState();
   updatePill();
   updateHeader();
   const el = document.getElementById('sessions');
@@ -413,7 +613,7 @@ function renderSessions() {
     } else if (s.status === 'active') {
       ind = `<span class="ind-char spin-char" style="color:${C.orange}">${spinC()}</span>`;
     } else if (s.status === 'waiting' && s.notification_message) {
-      ind = `<div class="ind-dot" style="background:#FFB300"></div>`;
+      ind = `<div class="ind-dot" style="background:${CFG.color_notification || '#FFB300'}"></div>`;
     } else if (s.status === 'waiting') {
       ind = `<div class="ind-dot" style="background:${C.green}"></div>`;
     } else {
@@ -434,7 +634,8 @@ function renderSessions() {
         label = 'Working...';
       } else if (s.notification_message) {
         label = 'Needs your input';
-        subCls = ' style="color:#FFB300"';
+        subCls = ` style="color:${CFG.color_notification || '#FFB300'}"`;
+
       } else {
         label = 'Ready';
       }
@@ -547,8 +748,175 @@ function connectSSE() {
   } catch (_) { setTimeout(connectSSE, sseD); sseD = Math.min(sseD * 2, 30000); }
 }
 
+// ─── Settings ────────────────────────────────
+let showSettings = false;
+let capturing = false;
+let pendingHotkey = null;
+let originalHotkey = '';
+let settingsData = {}; // live settings from backend
+
+document.getElementById('header-menu').addEventListener('click', async () => {
+  showSettings = !showSettings;
+  document.getElementById('sessions').style.display = showSettings ? 'none' : '';
+  document.getElementById('settings').style.display = showSettings ? 'block' : 'none';
+  if (showSettings) {
+    // Load live settings from backend
+    try { settingsData = await (await fetch(`${BASE}/api/settings`)).json(); } catch(e) {}
+    originalHotkey = settingsData.hotkey || CFG.hotkey || 'Alt+D';
+    pendingHotkey = null;
+    document.getElementById('hotkey-box').textContent = originalHotkey;
+    document.getElementById('hotkey-box').classList.remove('capturing');
+    // Sound
+    const snd = settingsData.sound_enabled !== false;
+    const tog = document.getElementById('sound-toggle');
+    tog.textContent = snd ? 'ON' : 'OFF';
+    tog.className = 'toggle-box ' + (snd ? 'on' : 'off');
+    // Autostart
+    const as_ = settingsData.autostart === true;
+    const asTog = document.getElementById('autostart-toggle');
+    asTog.textContent = as_ ? 'ON' : 'OFF';
+    asTog.className = 'toggle-box ' + (as_ ? 'on' : 'off');
+    document.getElementById('sound-stop').value = settingsData.sound_stop || 'asterisk';
+    document.getElementById('sound-notification').value = settingsData.sound_notification || 'exclamation';
+    document.getElementById('sound-permission').value = settingsData.sound_permission || 'question';
+  } else {
+    cancelCapture();
+  }
+});
+
+function toggleSound() {
+  const tog = document.getElementById('sound-toggle');
+  const isOn = tog.classList.contains('on');
+  tog.textContent = isOn ? 'OFF' : 'ON';
+  tog.className = 'toggle-box ' + (isOn ? 'off' : 'on');
+}
+
+function toggleAutostart() {
+  const tog = document.getElementById('autostart-toggle');
+  const isOn = tog.classList.contains('on');
+  tog.textContent = isOn ? 'OFF' : 'ON';
+  tog.className = 'toggle-box ' + (isOn ? 'off' : 'on');
+}
+
+function startCapture() {
+  capturing = true;
+  pendingHotkey = null;
+  const box = document.getElementById('hotkey-box');
+  box.textContent = 'Press keys\u2026';
+  box.classList.add('capturing');
+  // Unregister current hotkey so OS doesn't swallow it
+  fetch(`${BASE}/api/hotkey/capture`, { method: 'POST' }).catch(() => {});
+}
+
+function cancelCapture() {
+  if (capturing) {
+    capturing = false;
+    document.getElementById('hotkey-box').classList.remove('capturing');
+    // Re-register old hotkey
+    fetch(`${BASE}/api/hotkey/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hotkey: originalHotkey })
+    }).catch(() => {});
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!capturing) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const parts = [];
+  if (e.ctrlKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  if (e.metaKey) parts.push('Super');
+  const key = e.key;
+  if (['Control','Alt','Shift','Meta'].includes(key)) return; // modifier only
+  // Normalize key name
+  const kn = key.length === 1 ? key.toUpperCase() : key;
+  parts.push(kn);
+  capturing = false;
+  pendingHotkey = parts.join('+');
+  const box = document.getElementById('hotkey-box');
+  box.textContent = pendingHotkey;
+  box.classList.remove('capturing');
+});
+
+function cancelSettings() {
+  cancelCapture();
+  pendingHotkey = null;
+  showSettings = false;
+  document.getElementById('sessions').style.display = '';
+  document.getElementById('settings').style.display = 'none';
+}
+
+async function saveSettings() {
+  // Save hotkey if changed
+  const hk = pendingHotkey || originalHotkey;
+  if (hk !== originalHotkey || pendingHotkey) {
+    try {
+      const r = await fetch(`${BASE}/api/hotkey/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hotkey: hk })
+      });
+      const d = await r.json();
+      if (d.ok) {
+        CFG.hotkey = hk;
+        originalHotkey = hk;
+        pendingHotkey = null;
+      } else {
+        document.getElementById('hotkey-box').textContent = (d.error || 'Error') + ' \u2014 try again';
+        return;
+      }
+    } catch(e) {}
+  } else if (capturing) {
+    // Cancel capture without change
+    cancelCapture();
+  }
+  // Save sound + autostart settings
+  const soundOn = document.getElementById('sound-toggle').classList.contains('on');
+  const soundStop = document.getElementById('sound-stop').value;
+  const soundNotification = document.getElementById('sound-notification').value;
+  const soundPermission = document.getElementById('sound-permission').value;
+  const autostartOn = document.getElementById('autostart-toggle').classList.contains('on');
+  try {
+    await fetch(`${BASE}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sound_enabled: soundOn,
+        sound_stop: soundStop,
+        sound_notification: soundNotification,
+        sound_permission: soundPermission,
+        autostart: autostartOn
+      })
+    });
+  } catch(e) {}
+  showSettings = false;
+  document.getElementById('sessions').style.display = '';
+  document.getElementById('settings').style.display = 'none';
+}
+
 // ─── Init ───────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadConfig();
+  // Apply config colors as CSS custom properties
+  const root = document.documentElement.style;
+  if (CFG.transparency !== 'off') {
+    const hex = CFG.background.replace('#','');
+    const r = parseInt(hex.substring(0,2), 16);
+    const g = parseInt(hex.substring(2,4), 16);
+    const b = parseInt(hex.substring(4,6), 16);
+    root.setProperty('--bg', `rgba(${r},${g},${b},${CFG.opacity})`);
+  } else {
+    root.setProperty('--bg', CFG.background);
+  }
+  root.setProperty('--color-active', CFG.color_active);
+  root.setProperty('--color-ready', CFG.color_ready);
+  root.setProperty('--color-permission', CFG.color_permission);
+  root.setProperty('--color-notification', CFG.color_notification);
+  // Init crab SVGs (uses C.orange which reads from CFG)
   document.getElementById('pill-crab').innerHTML = crabSvg(14);
   document.getElementById('header-crab').innerHTML = crabSvg(16);
   fetchAll();
