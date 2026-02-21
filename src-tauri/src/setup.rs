@@ -31,6 +31,30 @@ fn claude_settings_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude").join("settings.json"))
 }
 
+/// Check if a hook entry (flat or nested) contains the given substring in its command.
+///
+/// Flat format:  `{ "type": "command", "command": "...agent-desk-hook..." }`
+/// Nested format: `{ "hooks": [{ "type": "command", "command": "...agent-desk-hook..." }] }`
+fn item_contains_hook(item: &Value, needle: &str) -> bool {
+    // Flat: item.command
+    if let Some(cmd) = item.get("command").and_then(|c| c.as_str()) {
+        if cmd.contains(needle) {
+            return true;
+        }
+    }
+    // Nested: item.hooks[*].command
+    if let Some(hooks_arr) = item.get("hooks").and_then(|h| h.as_array()) {
+        for hook in hooks_arr {
+            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                if cmd.contains(needle) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Ensure all Agent Desk hooks are present in `~/.claude/settings.json`.
 ///
 /// - Missing file → created with full hooks config
@@ -92,16 +116,14 @@ pub fn ensure_hooks_configured() {
 
     for &(claude_event, hook_arg) in HOOK_EVENTS {
         let command = format!("{} --event {}", hook_cmd_path, hook_arg);
-        let entry = json!({ "type": "command", "command": command });
+        let entry = json!({
+            "hooks": [{ "type": "command", "command": command }]
+        });
 
         match hooks.get_mut(claude_event) {
             Some(Value::Array(arr)) => {
-                // Find existing agent-desk-hook entry
-                let idx = arr.iter().position(|item| {
-                    item.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.contains("agent-desk-hook"))
-                });
+                // Find existing agent-desk-hook entry (check both nested and flat formats)
+                let idx = arr.iter().position(|item| item_contains_hook(item, "agent-desk-hook"));
                 match idx {
                     Some(i) if arr[i] == entry => {} // already up-to-date
                     Some(i) => {
