@@ -1,0 +1,18 @@
+[package]
+name = "agent-desk-hook"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight hook forwarder for Agent Desk"
+
+[[bin]]
+name = "agent-desk-hook"
+path = "src/main.rs"
+
+[dependencies]
+ureq = { version = "3", features = ["json"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

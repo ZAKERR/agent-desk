@@ -1,0 +1,43 @@
+# AutoCLI 通知与控制配置
+# 首次使用前请填写需要的渠道配置
+
+# Telegram Bot (双向: 通知 + 远程控制)
+telegram:
+  enabled: false
+  bot_token: ""              # 从 @BotFather 获取
+  chat_id: ""                # 你的个人 chat ID
+  allowed_user_ids: []       # 限制谁能发命令, 填 Telegram user ID
+
+# 钉钉机器人 (单向通知)
+dingtalk:
+  enabled: false
+  webhook_url: "https://oapi.dingtalk.com/robot/send"
+  access_token: ""
+  secret: ""                 # HMAC-SHA256 签名密钥
+
+# 微信推送 (单向通知)
+wechat:
+  enabled: false
+  provider: "pushplus"       # "pushplus" 或 "serverchan"
+  pushplus_token: ""
+  serverchan_sendkey: ""
+
+# 通知管理器 (python manager.py)
+manager:
+  port: 15924                # HTTP 端口, 浏览器访问 http://localhost:15924
+  events_file: "D:/Lab/AutoCLI/events.jsonl"
+  max_events_age: 86400      # 事件保留时间(秒)
+  open_browser: true         # 启动时自动打开浏览器
+
+# 桌面伴侣 (transparent always-on-top companion blob)
+widget:
+  enabled: true              # true = 启用桌面伴侣, false = 仅浏览器模式
+  on_top: true               # 始终置顶
+  opacity: 1.0               # 透明度 0.0-1.0 (保留, 未来使用)
+
+# 通用设置
+general:
+  sessions_file: "D:/Lab/AutoCLI/sessions.json"
+  claude_cli: "claude"
+  git_bash_path: "D:/Program Files/Git/bin/bash.exe"  # Windows 必需
+  session_ttl: 86400         # 会话记录保留时间(秒)

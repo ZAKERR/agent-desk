@@ -1,0 +1,30 @@
+# Rust build artifacts
+src-tauri/target/
+hooks/target/
+
+# Tauri generated files
+src-tauri/gen/schemas/
+
+# Test screenshots (root level)
+*.png
+
+# Logs
+*.log
+server.log
+
+# Playwright MCP
+.playwright-mcp/
+
+# Claude Code local settings
+.claude/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
