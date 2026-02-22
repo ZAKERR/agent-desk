@@ -32,6 +32,7 @@ use crate::sse::SSEBroadcaster;
 use crate::protocol::{
     HookEvent, SessionStatus, PermissionDecisionKind,
     SignalPayload, HookPayload, PermissionRequestPayload, PermissionRespondPayload,
+    ChatSendPayload,
 };
 
 pub struct AppState {
@@ -222,6 +223,7 @@ pub async fn run_server(state: Arc<AppState>) {
         .route("/api/permissions", get(api_permissions))
         .route("/api/chat", get(api_chat))
         .route("/api/chat/v2", get(api_chat_v2))
+        .route("/api/chat/send", post(api_chat_send))
         .layer(cors)
         .layer(middleware::from_fn(version_header))
         .with_state(state);
@@ -1303,4 +1305,95 @@ async fn api_chat_v2(
         "messages": result.0,
         "next_index": result.1,
     }))
+}
+
+/// POST /api/chat/send — send a message to a Claude Code session via SendInput.
+async fn api_chat_send(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ChatSendPayload>, JsonRejection>,
+) -> Json<Value> {
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("{}", e) })),
+    };
+
+    let message = payload.message.trim().to_string();
+    if message.is_empty() {
+        return Json(json!({ "ok": false, "error": "empty message" }));
+    }
+
+    // Safety check: verify session state if session_id is provided
+    if !payload.session_id.is_empty() {
+        let sessions = state.session_tracker.get_active(state.config.general.session_ttl);
+        if let Some(info) = sessions.get(&payload.session_id) {
+            match info.status {
+                SessionStatus::Active if !payload.force => {
+                    return Json(json!({
+                        "ok": false,
+                        "error": "session is active (working). Set force=true to send anyway.",
+                        "status": "active"
+                    }));
+                }
+                SessionStatus::Ended => {
+                    return Json(json!({ "ok": false, "error": "session has ended" }));
+                }
+                _ => {} // Idle, Waiting, Stopped, Active+force — all OK
+            }
+        }
+    }
+
+    // Resolve PID from scan_and_merge if not provided
+    let pid = payload.pid.or_else(|| {
+        if payload.cwd.is_empty() { return None; }
+        let cwd_norm = payload.cwd.replace('/', "\\").to_lowercase();
+        let merged = scan_and_merge(&state);
+        merged.iter().find_map(|proc| {
+            let pcwd = proc.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+            if pcwd.replace('/', "\\").to_lowercase() == cwd_norm {
+                proc.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32)
+            } else {
+                None
+            }
+        })
+    });
+
+    let cwd = payload.cwd.clone();
+    let cached = state.registry.get_cached();
+    let sse = state.sse.clone();
+    let session_id = payload.session_id.clone();
+    let msg_clone = message.clone();
+
+    // All Win32 calls must happen on spawn_blocking (not tokio thread)
+    let result = tokio::task::spawn_blocking(move || {
+        // 1. Find terminal window
+        let terminal = match focus::find_terminal(&cwd, &cached, pid) {
+            Some(m) => m,
+            None => return Err("terminal window not found".to_string()),
+        };
+
+        // 2. Focus it
+        focus::focus_terminal(&terminal);
+
+        // 3. Wait for focus to settle
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // 4. Type the message + Enter
+        crate::send_input::send_text_to_focused_window(&msg_clone)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("task join error: {}", e)));
+
+    match result {
+        Ok(()) => {
+            sse.broadcast("chat_sent", json!({
+                "session_id": &session_id,
+                "message": &message,
+            }));
+            Json(json!({ "ok": true }))
+        }
+        Err(e) => {
+            tracing::warn!("chat/send failed for session {}: {}", session_id, e);
+            Json(json!({ "ok": false, "error": e }))
+        }
+    }
 }

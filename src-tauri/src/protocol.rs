@@ -161,3 +161,18 @@ pub struct PermissionRespondPayload {
     pub id: String,
     pub decision: PermissionDecisionKind,
 }
+
+/// POST /api/chat/send — send a message to a Claude Code session via SendInput.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatSendPayload {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub cwd: String,
+    pub message: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// If true, send even when session is active (not waiting). Default false.
+    #[serde(default)]
+    pub force: bool,
+}

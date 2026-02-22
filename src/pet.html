@@ -338,6 +338,105 @@ html, body {
   padding: 8px 8px 0;
 }
 
+/* ─── Chat View ─── */
+#chat-view { display: none; flex-direction: column; height: calc(100vh - 38px); }
+#chat-view.show { display: flex; }
+#chat-header {
+  display: flex; align-items: center;
+  padding: 6px 8px; gap: 8px; flex-shrink: 0;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+#chat-back {
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: rgba(255,255,255,0.4);
+  font-size: 16px; border-radius: 6px;
+  border: none; background: none;
+  transition: color 0.15s, background 0.15s;
+}
+#chat-back:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.08); }
+#chat-title {
+  flex: 1; font-size: 12px; font-weight: 500;
+  color: rgba(255,255,255,0.7);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#chat-status {
+  font-size: 10px; padding: 2px 8px;
+  border-radius: 10px; font-weight: 500;
+}
+.cst-waiting { background: rgba(102,191,115,0.15); color: var(--color-ready); }
+.cst-active  { background: rgba(217,120,87,0.15); color: var(--color-active); }
+.cst-idle    { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.4); }
+
+#chat-messages {
+  flex: 1; overflow-y: auto; padding: 8px;
+}
+#chat-messages::-webkit-scrollbar { width: 3px; }
+#chat-messages::-webkit-scrollbar-track { background: transparent; }
+#chat-messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+.chat-msg {
+  margin-bottom: 6px; padding: 7px 10px;
+  border-radius: 10px; font-size: 12px;
+  line-height: 1.5; word-wrap: break-word;
+  max-width: 88%;
+}
+.chat-msg.user {
+  background: rgba(102,153,255,0.12);
+  color: rgba(255,255,255,0.85);
+  margin-left: auto;
+  border-bottom-right-radius: 4px;
+}
+.chat-msg.assistant {
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.8);
+  margin-right: auto;
+  border-bottom-left-radius: 4px;
+}
+.chat-msg.tool {
+  background: rgba(102,191,115,0.06);
+  color: rgba(255,255,255,0.45);
+  font-size: 11px;
+  font-family: 'Cascadia Code','Consolas',monospace;
+  margin-right: auto;
+}
+.chat-empty {
+  color: rgba(255,255,255,0.15);
+  text-align: center; padding: 32px 0; font-size: 11px;
+}
+
+#chat-input-area {
+  display: flex; align-items: center;
+  padding: 6px 8px; gap: 6px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  flex-shrink: 0;
+}
+#chat-input {
+  flex: 1; padding: 7px 10px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.9);
+  font-size: 12px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  outline: none;
+  transition: border-color 0.15s;
+}
+#chat-input:focus { border-color: rgba(255,255,255,0.25); }
+#chat-input::placeholder { color: rgba(255,255,255,0.25); }
+#chat-input:disabled { opacity: 0.4; cursor: not-allowed; }
+#chat-send {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: none;
+  background: rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.5);
+  font-size: 12px; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+#chat-send:hover { background: rgba(255,255,255,0.2); color: rgba(255,255,255,0.8); }
+#chat-send:disabled { opacity: 0.3; cursor: not-allowed; }
+
 /* No fadeIn animation — innerHTML rebuild would re-trigger it causing flicker */
 </style>
 </head>
@@ -411,6 +510,19 @@ html, body {
       <div class="settings-actions">
         <button class="perm-btn deny" onclick="cancelSettings()">Cancel</button>
         <button class="perm-btn allow" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+    <div id="chat-view">
+      <div id="chat-header">
+        <button id="chat-back" onclick="closeChat()">&#8249;</button>
+        <span id="chat-title">Chat</span>
+        <span id="chat-status"></span>
+      </div>
+      <div id="chat-messages"></div>
+      <div id="chat-input-area">
+        <input id="chat-input" type="text" placeholder="Send a message..."
+               onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}">
+        <button id="chat-send" onclick="sendChat()" title="Send">&#x27A4;</button>
       </div>
     </div>
   </div>
@@ -496,6 +608,7 @@ function doCollapse() {
   if (!isExpanded) return;
   isExpanded = false;
   if (autoCloseTimer) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
+  if (chatSession) closeChat();
   document.getElementById('panel').classList.remove('show');
   document.getElementById('pill').classList.remove('hide');
   fetch(`${BASE}/api/island/collapse`, { method: 'POST' }).catch(() => {});
@@ -649,13 +762,13 @@ function renderSessions() {
     let acts;
     if (pm) {
       acts = `<div class="sess-actions always">
-        <button class="act-btn" onclick="event.stopPropagation();focusSess(${i})" title="Chat">&#x1F4AC;</button>
+        <button class="act-btn" onclick="event.stopPropagation();openChat(${i})" title="Chat">&#x1F4AC;</button>
         <button class="perm-btn deny" onclick="event.stopPropagation();rPerm('${pm.id}','deny')">Deny</button>
         <button class="perm-btn allow" onclick="event.stopPropagation();rPerm('${pm.id}','allow')">Allow</button>
       </div>`;
     } else {
       acts = `<div class="sess-actions">
-        <button class="act-btn" onclick="event.stopPropagation();focusSess(${i})" title="Chat">&#x1F4AC;</button>
+        <button class="act-btn" onclick="event.stopPropagation();openChat(${i})" title="Chat">&#x1F4AC;</button>
         <button class="act-btn" onclick="event.stopPropagation();focusSess(${i})" title="Focus">&#x1F4FA;</button>
         <button class="act-btn" onclick="event.stopPropagation();dismissSess(${i})" title="Dismiss">&#x1F4E6;</button>
       </div>`;
@@ -757,6 +870,16 @@ async function fetchAll() {
       renderSessions();
     }
     if (isExpanded) markRead();
+    // Sync chat session status if chat is open
+    if (chatSession) {
+      const cs = sessions.find(s => s.session_id === chatSession.session_id);
+      if (cs) {
+        chatSession.status = cs.status;
+        chatSession.pid = cs.pid;
+        updateChatStatus(cs.status);
+        updateChatInputState();
+      }
+    }
   } catch (e) {}
 }
 
@@ -783,10 +906,185 @@ function connectSSE() {
       } else if (m.type === 'permission_countdown') {
         permCountdowns[m.id] = { remaining: m.remaining, total: m.total };
         renderSessions();
+      } else if (m.type === 'chat_sent') {
+        if (chatSession && m.session_id === chatSession.session_id) {
+          setTimeout(fetchChat, 1000);
+        }
+      }
+      // If chat is open, refresh on activity for this session
+      if (chatSession && (m.type === 'activity' || m.type === 'event')) {
+        const sid = m.session_id || (m.data && m.data.session_id);
+        if (sid === chatSession.session_id) fetchChat();
       }
     } catch (_) {} };
     sse.onerror = () => { sse.close(); sse = null; setTimeout(connectSSE, sseD); sseD = Math.min(sseD * 2, 30000); };
   } catch (_) { setTimeout(connectSSE, sseD); sseD = Math.min(sseD * 2, 30000); }
+}
+
+// ─── Chat View ──────────────────────────────
+let chatSession = null;     // { session_id, cwd, pid, status }
+let chatMessages = [];
+let chatNextIndex = 0;
+let chatPollTimer = null;
+let chatSending = false;
+
+function openChat(i) {
+  const s = sessions[i];
+  if (!s || !s.session_id) return;
+  chatSession = { session_id: s.session_id, cwd: s.cwd, pid: s.pid, status: s.status };
+  chatMessages = [];
+  chatNextIndex = 0;
+
+  // Switch views
+  document.getElementById('sessions').style.display = 'none';
+  document.getElementById('settings').style.display = 'none';
+  document.getElementById('chat-view').classList.add('show');
+  showSettings = false;
+
+  // Set header
+  document.getElementById('chat-title').textContent = proj(s.cwd);
+  updateChatStatus(s.status);
+  updateChatInputState();
+
+  // Fetch chat history + start polling
+  fetchChat();
+  chatPollTimer = setInterval(fetchChat, 2000);
+}
+
+function closeChat() {
+  chatSession = null;
+  chatMessages = [];
+  chatNextIndex = 0;
+  if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
+
+  document.getElementById('chat-view').classList.remove('show');
+  document.getElementById('sessions').style.display = '';
+}
+
+function updateChatStatus(status) {
+  const el = document.getElementById('chat-status');
+  if (status === 'active') {
+    el.textContent = 'Working';
+    el.className = 'cst-active';
+  } else if (status === 'waiting' || status === 'idle') {
+    el.textContent = 'Ready';
+    el.className = 'cst-waiting';
+  } else {
+    el.textContent = status || '';
+    el.className = 'cst-idle';
+  }
+}
+
+function updateChatInputState() {
+  if (!chatSession) return;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('chat-send');
+  const active = chatSession.status === 'active';
+  input.disabled = active;
+  btn.disabled = active;
+  input.placeholder = active ? 'Waiting for Claude to finish...' : 'Send a message...';
+}
+
+async function fetchChat() {
+  if (!chatSession) return;
+  try {
+    const params = new URLSearchParams({
+      session_id: chatSession.session_id,
+      cwd: chatSession.cwd,
+      after: chatNextIndex.toString(),
+    });
+    const r = await fetch(`${BASE}/api/chat/v2?${params}`);
+    const d = await r.json();
+    if (d.messages && d.messages.length > 0) {
+      chatMessages = chatMessages.concat(d.messages);
+      chatNextIndex = d.next_index;
+      renderChat();
+    }
+  } catch (e) {}
+}
+
+function renderChat() {
+  const el = document.getElementById('chat-messages');
+  const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+
+  if (!chatMessages.length) {
+    el.innerHTML = '<div class="chat-empty">No messages yet</div>';
+    return;
+  }
+
+  el.innerHTML = chatMessages.map(m => {
+    const ev = m.event;
+    if (!ev) return '';
+    switch (ev.type) {
+      case 'text': {
+        const cls = ev.role === 'user' ? 'user' : 'assistant';
+        const txt = esc(ev.content || '').replace(/\n/g, '<br>')
+          .replace(/`([^`]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:1px 4px;border-radius:3px">$1</code>');
+        return `<div class="chat-msg ${cls}">${txt}</div>`;
+      }
+      case 'tool_call':
+        return `<div class="chat-msg tool">\u{1F527} ${esc(ev.name || 'tool')}</div>`;
+      case 'tool_result': {
+        const c = esc(trn(ev.content || '', 120));
+        const st = ev.is_error ? ' style="color:#FF6666"' : '';
+        return `<div class="chat-msg tool"${st}>${c || '(no output)'}</div>`;
+      }
+      case 'thinking':
+        return `<div class="chat-msg tool" style="font-style:italic;opacity:0.6">${esc(trn(ev.summary || '', 80))}</div>`;
+      default: return '';
+    }
+  }).filter(Boolean).join('');
+
+  if (wasBottom) el.scrollTop = el.scrollHeight;
+}
+
+async function sendChat() {
+  if (!chatSession || chatSending) return;
+  const input = document.getElementById('chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+
+  chatSending = true;
+  input.disabled = true;
+  document.getElementById('chat-send').disabled = true;
+
+  try {
+    const r = await fetch(`${BASE}/api/chat/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: chatSession.session_id,
+        cwd: chatSession.cwd,
+        pid: chatSession.pid,
+        message: message,
+      }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      input.value = '';
+      // Optimistic: show sent message immediately
+      chatMessages.push({
+        uuid: 'local-' + Date.now(),
+        timestamp: new Date().toISOString(),
+        event: { type: 'text', role: 'user', content: message },
+      });
+      renderChat();
+      document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
+      setTimeout(fetchChat, 1500);
+    } else {
+      const err = d.error || 'Failed to send';
+      input.value = '';
+      input.placeholder = err;
+      setTimeout(() => { if (!chatSending) updateChatInputState(); }, 3000);
+    }
+  } catch (e) {
+    input.placeholder = 'Connection error';
+    setTimeout(() => { if (!chatSending) updateChatInputState(); }, 3000);
+  } finally {
+    chatSending = false;
+    updateChatInputState();
+    input.focus();
+  }
 }
 
 // ─── Settings ────────────────────────────────
@@ -797,6 +1095,7 @@ let originalHotkey = '';
 let settingsData = {}; // live settings from backend
 
 document.getElementById('header-menu').addEventListener('click', async () => {
+  if (chatSession) closeChat();
   showSettings = !showSettings;
   document.getElementById('sessions').style.display = showSettings ? 'none' : '';
   document.getElementById('settings').style.display = showSettings ? 'block' : 'none';

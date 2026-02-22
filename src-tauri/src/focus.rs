@@ -12,36 +12,59 @@ const TERMINAL_PROCESSES: &[&str] = &[
 ];
 
 
+/// Find the terminal window for a session without focusing it.
+/// Returns `TerminalMatch` (hwnd + optional WT tab info) or `None`.
+#[cfg(windows)]
+pub fn find_terminal(cwd: &str, cached_processes: &[ProcessInfo], pid: Option<u32>) -> Option<TerminalMatch> {
+    let snapshot = ProcessSnapshot::capture();
+
+    // Strategy 1 (best): walk from the specific agent PID up to its terminal.
+    if let Some(p) = pid {
+        if let Some(m) = walk_to_terminal(&snapshot, p) {
+            tracing::debug!("find_terminal: Strategy 1 (PID walk) matched: PID {} → hwnd {}", p, m.hwnd);
+            return Some(m);
+        }
+    }
+
+    if !cwd.is_empty() {
+        // Strategy 2: walk from each cached agent process, check terminal title vs CWD
+        if let Some(m) = find_terminal_for_cwd(cwd, cached_processes, &snapshot) {
+            tracing::debug!("find_terminal: Strategy 2 (CWD process walk) matched: hwnd {}", m.hwnd);
+            return Some(m);
+        }
+
+        // Strategy 3: scan all visible windows, match title vs CWD (only known terminals)
+        if let Some(hwnd) = find_terminal_by_title(cwd) {
+            tracing::debug!("find_terminal: Strategy 3 (title scan) matched: hwnd {}", hwnd);
+            return Some(TerminalMatch { hwnd, wt_tab: None });
+        }
+    }
+
+    None
+}
+
+#[cfg(not(windows))]
+pub fn find_terminal(_cwd: &str, _cached_processes: &[ProcessInfo], _pid: Option<u32>) -> Option<()> {
+    None
+}
+
+/// Focus a terminal match: set foreground + switch WT tab if applicable.
+#[cfg(windows)]
+pub fn focus_terminal(m: &TerminalMatch) -> bool {
+    let ok = focus_hwnd(m.hwnd);
+    if ok {
+        if let Some((wt_pid, shell_pid)) = m.wt_tab {
+            switch_wt_tab(wt_pid, shell_pid);
+        }
+    }
+    ok
+}
+
 pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessInfo], pid: Option<u32>) -> bool {
     #[cfg(windows)]
     {
-        let snapshot = ProcessSnapshot::capture();
-
-        // Strategy 1 (best): walk from the specific agent PID up to its terminal.
-        // This is the most reliable — directly traces the process tree.
-        if let Some(p) = pid {
-            if let Some(m) = walk_to_terminal(&snapshot, p) {
-                tracing::debug!("focus: Strategy 1 (PID walk) matched: PID {} → hwnd {}", p, m.hwnd);
-                let ok = focus_hwnd(m.hwnd);
-                if ok { if let Some((wt_pid, shell_pid)) = m.wt_tab { switch_wt_tab(wt_pid, shell_pid); } }
-                return ok;
-            }
-        }
-
-        if !cwd.is_empty() {
-            // Strategy 2: walk from each cached agent process, check terminal title vs CWD
-            if let Some(m) = find_terminal_for_cwd(cwd, cached_processes, &snapshot) {
-                tracing::debug!("focus: Strategy 2 (CWD process walk) matched: hwnd {}", m.hwnd);
-                let ok = focus_hwnd(m.hwnd);
-                if ok { if let Some((wt_pid, shell_pid)) = m.wt_tab { switch_wt_tab(wt_pid, shell_pid); } }
-                return ok;
-            }
-
-            // Strategy 3: scan all visible windows, match title vs CWD (only known terminals)
-            if let Some(hwnd) = find_terminal_by_title(cwd) {
-                tracing::debug!("focus: Strategy 3 (title scan) matched: hwnd {}", hwnd);
-                return focus_hwnd(hwnd);
-            }
+        if let Some(m) = find_terminal(cwd, cached_processes, pid) {
+            return focus_terminal(&m);
         }
     }
 
@@ -51,10 +74,10 @@ pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessIn
 
 /// Result from walk_to_terminal: the terminal window + optional WT tab info.
 #[cfg(windows)]
-struct TerminalMatch {
-    hwnd: isize,
+pub struct TerminalMatch {
+    pub hwnd: isize,
     /// If the terminal is Windows Terminal: (wt_pid, target_shell_pid) for tab switching.
-    wt_tab: Option<(u32, u32)>,
+    pub wt_tab: Option<(u32, u32)>,
 }
 
 /// Cached Toolhelp32 process snapshot — avoids creating one per walk level.
@@ -185,7 +208,7 @@ fn walk_to_terminal(snapshot: &ProcessSnapshot, pid: u32) -> Option<TerminalMatc
 /// sort by creation time (approximates tab order), find the index of
 /// `target_shell_pid`, and run `wt.exe -w 0 focus-tab -t <index>`.
 #[cfg(windows)]
-fn switch_wt_tab(wt_pid: u32, target_shell_pid: u32) {
+pub fn switch_wt_tab(wt_pid: u32, target_shell_pid: u32) {
     use windows::Win32::System::Diagnostics::ToolHelp::*;
     use windows::Win32::Foundation::CloseHandle;
 
@@ -388,7 +411,7 @@ fn get_window_process_name(hwnd: windows::Win32::Foundation::HWND) -> String {
 }
 
 #[cfg(windows)]
-fn focus_hwnd(hwnd: isize) -> bool {
+pub fn focus_hwnd(hwnd: isize) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::Foundation::HWND;

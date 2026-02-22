@@ -8,6 +8,7 @@ pub mod server;
 mod process;
 mod adapter;
 mod focus;
+mod send_input;
 pub mod tray;
 mod remote;
 pub mod island;
