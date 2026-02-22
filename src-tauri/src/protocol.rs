@@ -127,6 +127,8 @@ pub struct SignalPayload {
     pub model: String,
     #[serde(default)]
     pub hook_pid: Option<u32>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 /// POST /api/hook body — lightweight status update.

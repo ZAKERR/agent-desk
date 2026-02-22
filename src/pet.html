@@ -685,6 +685,39 @@ function dismissSess(i) {
   fetch(`${BASE}/api/session/${s.session_id}`, { method: 'DELETE' }).catch(() => {});
 }
 
+// ─── Data contracts ─────────────────────────
+/** @typedef {{ pid: number, name: string, agent_type: string, cwd: string, uptime: number, status: string, session_id: string, notification_type: string, notification_message: string, last_message: string, parent_session_id?: string }} Session */
+/** @typedef {{ id: string, session_id: string, cwd: string, tool_name: string, tool_input: object, timestamp: number, timeout_secs: number }} Permission */
+
+/** @param {object} raw @returns {Session} */
+function validateSession(raw) {
+  return {
+    pid: raw.pid || 0,
+    name: raw.name || '',
+    agent_type: raw.agent_type || '',
+    cwd: raw.cwd || '',
+    uptime: raw.uptime || 0,
+    status: raw.status || 'unknown',
+    session_id: raw.session_id || '',
+    notification_type: raw.notification_type || '',
+    notification_message: raw.notification_message || '',
+    last_message: raw.last_message || '',
+    parent_session_id: raw.parent_session_id || null,
+  };
+}
+/** @param {object} raw @returns {Permission} */
+function validatePermission(raw) {
+  return {
+    id: raw.id || '',
+    session_id: raw.session_id || '',
+    cwd: raw.cwd || '',
+    tool_name: raw.tool_name || '',
+    tool_input: raw.tool_input || {},
+    timestamp: raw.timestamp || 0,
+    timeout_secs: raw.timeout_secs || 600,
+  };
+}
+
 // ─── Permissions ────────────────────────────
 function rPerm(id, decision) {
   fetch(`${BASE}/api/permission-respond`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, decision }) }).catch(() => {});
@@ -697,7 +730,7 @@ async function fetchPerms() {
     const r = await fetch(`${BASE}/api/permissions`);
     const d = await r.json();
     const prev = perms.length;
-    const newPerms = d.requests || [];
+    const newPerms = (d.requests || []).map(validatePermission);
     const ph = JSON.stringify(newPerms);
     if (ph !== lastPH) {
       lastPH = ph;
@@ -720,7 +753,7 @@ async function fetchAll() {
     const sh = sessHash(d.processes);
     if (sh !== lastSH) {
       lastSH = sh;
-      sessions = d.processes || [];
+      sessions = (d.processes || []).map(validateSession);
       renderSessions();
     }
     if (isExpanded) markRead();

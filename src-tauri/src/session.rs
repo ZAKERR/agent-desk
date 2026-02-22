@@ -29,6 +29,8 @@ pub struct SessionInfo {
     pub notification_message: Option<String>,
     #[serde(default)]
     pub agent_pid: Option<u32>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 pub struct SessionTracker {
@@ -78,6 +80,7 @@ impl SessionTracker {
             notification_type: None,
             notification_message: None,
             agent_pid,
+            parent_session_id: None,
         };
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.insert(session_id.to_string(), info);
@@ -100,6 +103,7 @@ impl SessionTracker {
                 notification_type: None,
                 notification_message: None,
                 agent_pid: None,
+                parent_session_id: None,
             }
         });
 
@@ -120,6 +124,9 @@ impl SessionTracker {
         }
         if let Some(pid) = updates.agent_pid {
             entry.agent_pid = Some(pid);
+        }
+        if let Some(parent) = updates.parent_session_id {
+            entry.parent_session_id = Some(parent);
         }
         entry.updated_at = now;
         self.dirty.store(true, Ordering::Relaxed);
@@ -194,4 +201,5 @@ pub struct SessionUpdate {
     pub notification_type: Option<String>,
     pub notification_message: Option<String>,
     pub agent_pid: Option<u32>,
+    pub parent_session_id: Option<String>,
 }

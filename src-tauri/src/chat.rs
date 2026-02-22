@@ -3,6 +3,10 @@
 //! Reads `~/.claude/projects/<project-dir>/<session-uuid>.jsonl`
 //! incrementally, deduplicates streaming assistant messages by UUID,
 //! and returns parsed chat messages.
+//!
+//! Two output formats:
+//! - v1 (`ChatMessage`): flat role/content — used by `/api/chat`
+//! - v2 (`EnrichedMessage`): typed events with model/cost — used by `/api/chat/v2`
 
 use serde::Serialize;
 use serde_json::Value;
@@ -12,6 +16,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+// ─── v1 types (unchanged) ───────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
@@ -29,11 +35,46 @@ pub struct ChatToolUse {
     pub tool_type: String,
 }
 
+// ─── v2 types (enriched) ────────────────────────────────
+
+/// Typed chat event — discriminated union serialized via `#[serde(tag = "type")]`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatEvent {
+    Text { role: String, content: String },
+    ToolCall { name: String, input: Value },
+    ToolResult { tool_use_id: String, content: String, is_error: bool },
+    Thinking { summary: String },
+}
+
+/// Enriched message with model info and cost metadata.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrichedMessage {
+    pub uuid: String,
+    pub timestamp: String,
+    pub event: ChatEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+// ─── Session cache ──────────────────────────────────────
+
 struct SessionCache {
     offset: u64,
     messages: Vec<ChatMessage>,
+    enriched: Vec<EnrichedMessage>,
     /// UUID → index in messages vec (for dedup of streaming updates)
     uuid_index: HashMap<String, usize>,
+    /// UUID → index in enriched vec (for dedup)
+    enriched_uuid_index: HashMap<String, usize>,
     last_accessed: Instant,
 }
 
@@ -56,9 +97,48 @@ impl ChatReader {
         cwd: &str,
         after: usize,
     ) -> (Vec<ChatMessage>, usize) {
+        self.ensure_parsed(session_id, cwd);
+        let cache_key = format!("{}:{}", session_id, cwd);
+        let cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache_map.get(&cache_key) {
+            let total = entry.messages.len();
+            if after >= total {
+                return (vec![], total);
+            }
+            let slice = entry.messages[after..].to_vec();
+            (slice, total)
+        } else {
+            (vec![], 0)
+        }
+    }
+
+    /// Read enriched (v2) messages for a session.
+    pub fn read_enriched(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        after: usize,
+    ) -> (Vec<EnrichedMessage>, usize) {
+        self.ensure_parsed(session_id, cwd);
+        let cache_key = format!("{}:{}", session_id, cwd);
+        let cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache_map.get(&cache_key) {
+            let total = entry.enriched.len();
+            if after >= total {
+                return (vec![], total);
+            }
+            let slice = entry.enriched[after..].to_vec();
+            (slice, total)
+        } else {
+            (vec![], 0)
+        }
+    }
+
+    /// Parse new lines from the JSONL file into both v1 and v2 caches.
+    fn ensure_parsed(&self, session_id: &str, cwd: &str) {
         let path = session_file_path(session_id, cwd);
         if !path.exists() {
-            return (vec![], 0);
+            return;
         }
 
         let cache_key = format!("{}:{}", session_id, cwd);
@@ -66,7 +146,9 @@ impl ChatReader {
         let entry = cache_map.entry(cache_key).or_insert_with(|| SessionCache {
             offset: 0,
             messages: Vec::new(),
+            enriched: Vec::new(),
             uuid_index: HashMap::new(),
+            enriched_uuid_index: HashMap::new(),
             last_accessed: Instant::now(),
         });
         entry.last_accessed = Instant::now();
@@ -85,11 +167,11 @@ impl ChatReader {
                         };
                         if line.trim().is_empty() { continue; }
                         if let Ok(row) = serde_json::from_str::<Value>(&line) {
+                            // v1 parsing
                             if let Some(msg) = parse_jsonl_row(&row) {
                                 let uuid = msg.uuid.clone();
                                 if !uuid.is_empty() {
                                     if let Some(&idx) = entry.uuid_index.get(&uuid) {
-                                        // Streaming update — replace existing
                                         entry.messages[idx] = msg;
                                     } else {
                                         let idx = entry.messages.len();
@@ -100,20 +182,27 @@ impl ChatReader {
                                     entry.messages.push(msg);
                                 }
                             }
+                            // v2 parsing — produces multiple events per row
+                            for em in parse_enriched_row(&row) {
+                                let uuid = em.uuid.clone();
+                                if !uuid.is_empty() {
+                                    if let Some(&idx) = entry.enriched_uuid_index.get(&uuid) {
+                                        entry.enriched[idx] = em;
+                                    } else {
+                                        let idx = entry.enriched.len();
+                                        entry.enriched_uuid_index.insert(uuid, idx);
+                                        entry.enriched.push(em);
+                                    }
+                                } else {
+                                    entry.enriched.push(em);
+                                }
+                            }
                         }
                     }
                     entry.offset = file_len;
                 }
             }
         }
-
-        let total = entry.messages.len();
-        if after >= total {
-            return (vec![], total);
-        }
-
-        let slice = entry.messages[after..].to_vec();
-        (slice, total)
     }
 
     /// Evict session caches not accessed within `max_age`.
@@ -146,6 +235,8 @@ fn session_file_path(session_id: &str, cwd: &str) -> PathBuf {
         .join(&project_dir)
         .join(format!("{}.jsonl", session_id))
 }
+
+// ─── v1 parsing (unchanged) ─────────────────────────────
 
 /// Parse a single JSONL row into a ChatMessage (if it's user or assistant).
 fn parse_jsonl_row(row: &Value) -> Option<ChatMessage> {
@@ -220,4 +311,141 @@ fn parse_message_content(message: &Value) -> (String, Vec<ChatToolUse>) {
     }
 
     (texts.join("\n"), tools)
+}
+
+// ─── v2 parsing (enriched) ──────────────────────────────
+
+/// Parse a single JSONL row into zero or more EnrichedMessages.
+///
+/// A single "assistant" row may produce multiple events:
+/// text, tool_call, thinking — each as a separate EnrichedMessage.
+fn parse_enriched_row(row: &Value) -> Vec<EnrichedMessage> {
+    let row_type = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if row_type != "user" && row_type != "assistant" {
+        return vec![];
+    }
+
+    let uuid = row.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let timestamp = row.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let message = match row.get("message") {
+        Some(m) => m,
+        None => return vec![],
+    };
+
+    let model = message.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let usage = row.get("usage").and_then(|u| {
+        let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        if input > 0 || output > 0 {
+            Some(TokenUsage { input_tokens: input, output_tokens: output })
+        } else {
+            None
+        }
+    });
+
+    let content = message.get("content");
+    let mut events = Vec::new();
+    let mut seq = 0u32;
+
+    // Helper: generate unique UUID for sub-events within a row
+    let make_uuid = |base: &str, seq: u32| -> String {
+        if seq == 0 { base.to_string() } else { format!("{}:{}", base, seq) }
+    };
+
+    match content {
+        Some(Value::String(s)) => {
+            let role = message.get("role").and_then(|v| v.as_str()).unwrap_or(row_type);
+            events.push(EnrichedMessage {
+                uuid: make_uuid(&uuid, seq),
+                timestamp: timestamp.clone(),
+                event: ChatEvent::Text { role: role.to_string(), content: s.clone() },
+                model: model.clone(),
+                usage: usage.clone(),
+            });
+        }
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match block_type {
+                    "text" => {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                            if !text.is_empty() {
+                                let role = message.get("role").and_then(|v| v.as_str()).unwrap_or(row_type);
+                                events.push(EnrichedMessage {
+                                    uuid: make_uuid(&uuid, seq),
+                                    timestamp: timestamp.clone(),
+                                    event: ChatEvent::Text { role: role.to_string(), content: text.to_string() },
+                                    model: model.clone(),
+                                    // Only attach usage to the first event
+                                    usage: if seq == 0 { usage.clone() } else { None },
+                                });
+                                seq += 1;
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
+                        let input = block.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                        events.push(EnrichedMessage {
+                            uuid: make_uuid(&uuid, seq),
+                            timestamp: timestamp.clone(),
+                            event: ChatEvent::ToolCall { name, input },
+                            model: model.clone(),
+                            usage: if seq == 0 { usage.clone() } else { None },
+                        });
+                        seq += 1;
+                    }
+                    "tool_result" => {
+                        let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let is_error = block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let result_content = match block.get("content") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(Value::Array(arr)) => {
+                                // Extract text from content blocks
+                                arr.iter()
+                                    .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            }
+                            _ => String::new(),
+                        };
+                        if !result_content.is_empty() || is_error {
+                            events.push(EnrichedMessage {
+                                uuid: make_uuid(&uuid, seq),
+                                timestamp: timestamp.clone(),
+                                event: ChatEvent::ToolResult { tool_use_id, content: result_content, is_error },
+                                model: None,
+                                usage: None,
+                            });
+                            seq += 1;
+                        }
+                    }
+                    "thinking" => {
+                        if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
+                            // Summarize: first 200 chars
+                            let summary = if thinking.len() > 200 {
+                                format!("{}...", &thinking[..200])
+                            } else {
+                                thinking.to_string()
+                            };
+                            events.push(EnrichedMessage {
+                                uuid: make_uuid(&uuid, seq),
+                                timestamp: timestamp.clone(),
+                                event: ChatEvent::Thinking { summary },
+                                model: model.clone(),
+                                usage: None,
+                            });
+                            seq += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+
+    events
 }

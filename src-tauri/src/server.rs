@@ -1,8 +1,9 @@
 use axum::{
     extract::{Path, Query, State, rejection::JsonRejection},
+    middleware::{self, Next},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
-        Json,
+        Json, Response,
     },
     routing::{delete, get, post},
     Router,
@@ -220,7 +221,9 @@ pub async fn run_server(state: Arc<AppState>) {
         .route("/api/permission-respond", post(api_permission_respond))
         .route("/api/permissions", get(api_permissions))
         .route("/api/chat", get(api_chat))
+        .route("/api/chat/v2", get(api_chat_v2))
         .layer(cors)
+        .layer(middleware::from_fn(version_header))
         .with_state(state);
 
     let addr = format!("127.0.0.1:{}", port);
@@ -232,6 +235,16 @@ pub async fn run_server(state: Arc<AppState>) {
     axum::serve(listener, app)
         .await
         .expect("HTTP server error");
+}
+
+/// Middleware: add X-Agent-Desk-Version header to all responses.
+async fn version_header(req: axum::extract::Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        "x-agent-desk-version",
+        axum::http::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+    );
+    resp
 }
 
 // --- Shared helpers ---
@@ -546,6 +559,18 @@ async fn api_signal(
                     if model.is_empty() { None } else { Some(model.as_str()) },
                     None,
                 );
+                // Link sub-agent to parent if parent_session_id is present
+                if let Some(ref parent_id) = payload.parent_session_id {
+                    if !parent_id.is_empty() {
+                        state.session_tracker.update(
+                            sid,
+                            SessionUpdate {
+                                parent_session_id: Some(parent_id.clone()),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
             }
             HookEvent::SessionEnd => {
                 state.session_tracker.update(
@@ -1248,6 +1273,30 @@ async fn api_chat(
     let s = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         s.chat_reader.read_messages(&session_id, &cwd, after)
+    }).await.unwrap_or_else(|_| (vec![], 0));
+
+    Json(json!({
+        "messages": result.0,
+        "next_index": result.1,
+    }))
+}
+
+/// Enriched chat — typed events with model/cost info.
+async fn api_chat_v2(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ChatQuery>,
+) -> Json<Value> {
+    let session_id = q.session_id.unwrap_or_default();
+    let cwd = q.cwd.unwrap_or_default();
+    let after = q.after.unwrap_or(0);
+
+    if session_id.is_empty() || cwd.is_empty() {
+        return Json(json!({ "messages": [], "next_index": 0 }));
+    }
+
+    let s = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        s.chat_reader.read_enriched(&session_id, &cwd, after)
     }).await.unwrap_or_else(|_| (vec![], 0));
 
     Json(json!({
