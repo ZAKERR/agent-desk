@@ -465,6 +465,7 @@ function updateSpinners() {
 let isExpanded = false;
 let sessions = [];
 let perms = [];
+let permCountdowns = {}; // { id: { remaining, total } }
 let hoverTimer = null;
 let leaveTimer = null;
 let autoCloseTimer = null;
@@ -626,7 +627,9 @@ function renderSessions() {
       title = s.last_message ? esc(trn(s.last_message, 40)) : nm;
       const tn = pm.tool_name || 'Tool';
       const ti = typeof pm.tool_input === 'string' ? pm.tool_input : JSON.stringify(pm.tool_input || {});
-      sub = `<div class="sess-sub"><span class="tool-name">${esc(tn)}</span> ${esc(trn(ti, 50))}</div>`;
+      const cd = permCountdowns[pm.id];
+      const cdStr = cd ? (() => { const m = Math.floor(cd.remaining / 60), s = cd.remaining % 60; const t = `${m}:${String(s).padStart(2,'0')}`; return cd.remaining < 60 ? ` <span style="color:#FF4444;font-weight:600">${t}</span>` : ` <span style="opacity:0.5">${t}</span>`; })() : '';
+      sub = `<div class="sess-sub"><span class="tool-name">${esc(tn)}</span> ${esc(trn(ti, 50))}${cdStr}</div>`;
     } else {
       title = nm;
       let label, subCls = '';
@@ -686,6 +689,7 @@ function dismissSess(i) {
 function rPerm(id, decision) {
   fetch(`${BASE}/api/permission-respond`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, decision }) }).catch(() => {});
   perms = perms.filter(p => p.id !== id);
+  delete permCountdowns[id];
   renderSessions();
 }
 async function fetchPerms() {
@@ -741,7 +745,11 @@ function connectSSE() {
         fetchAll();
       } else if (m.type === 'permission_request') {
         doExpand(false); // permission needs user action, don't auto-close
+        if (m.timeout_secs) permCountdowns[m.id] = { remaining: m.timeout_secs, total: m.timeout_secs };
         fetchPerms();
+      } else if (m.type === 'permission_countdown') {
+        permCountdowns[m.id] = { remaining: m.remaining, total: m.total };
+        renderSessions();
       }
     } catch (_) {} };
     sse.onerror = () => { sse.close(); sse = null; setTimeout(connectSSE, sseD); sseD = Math.min(sseD * 2, 30000); };

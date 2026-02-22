@@ -14,7 +14,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
@@ -50,6 +50,8 @@ pub struct AppState {
     pub live_sound_notification: RwLock<String>,
     pub live_sound_permission: RwLock<String>,
     pub http_client: reqwest::Client,
+    pub start_time: Instant,
+    pub dedup_cache: RwLock<HashMap<String, f64>>,
 }
 
 impl AppState {
@@ -91,6 +93,8 @@ impl AppState {
             live_sound_notification,
             live_sound_permission,
             http_client,
+            start_time: Instant::now(),
+            dedup_cache: RwLock::new(HashMap::new()),
         }, rx)
     }
 }
@@ -173,6 +177,17 @@ pub async fn run_server(state: Arc<AppState>) {
         }
     });
 
+    // Background: clean dedup cache (every 60s, remove entries older than 5s)
+    let dedup_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            let cutoff = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() - 5.0;
+            let mut cache = dedup_state.dedup_cache.write().unwrap_or_else(|e| e.into_inner());
+            cache.retain(|_, ts| *ts > cutoff);
+        }
+    });
+
     // CORS: allow tauri://localhost and browser origins to reach the API
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -180,6 +195,7 @@ pub async fn run_server(state: Arc<AppState>) {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/api/health", get(api_health))
         .route("/api/all", get(api_all))
         .route("/api/events", get(api_events))
         .route("/api/sessions", get(api_sessions))
@@ -428,6 +444,20 @@ async fn api_stream(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+async fn api_health(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let uptime = state.start_time.elapsed().as_secs();
+    let session_count = state.session_tracker.get_active(state.config.general.session_ttl).len();
+    let pending_permissions = state.permissions.get_pending().len();
+
+    Json(json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime": uptime,
+        "sessions": session_count,
+        "pending_permissions": pending_permissions,
+    }))
+}
+
 #[derive(Deserialize)]
 struct HookQuery {
     event: Option<HookEvent>,
@@ -445,6 +475,21 @@ async fn api_hook(
     let event = q.event.as_ref();
     let sid = &payload.session_id;
     let cwd = &payload.cwd;
+
+    // Dedup: skip if same session+event within 500ms window
+    if let Some(ev) = event {
+        if !sid.is_empty() {
+            let dedup_key = format!("{}:{}", sid, ev);
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+            let mut cache = state.dedup_cache.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(&last) = cache.get(&dedup_key) {
+                if now - last < 0.5 {
+                    return Json(json!({ "ok": true, "dedup": true }));
+                }
+            }
+            cache.insert(dedup_key, now);
+        }
+    }
 
     if !sid.is_empty() && matches!(event, Some(HookEvent::UserPrompt) | Some(HookEvent::PreTool)) {
         state.session_tracker.update(
@@ -866,15 +911,18 @@ async fn api_permission_request(
         tool_input: tool_input.clone(),
         permission_suggestions: permission_suggestions.clone(),
         timestamp: now,
+        timeout_secs: state.config.island.permission_timeout_secs,
     };
 
     let rx = state.permissions.register(req);
+    let timeout_secs = state.config.island.permission_timeout_secs;
 
     // SSE broadcast + sound + auto-expand island
     state.sse.broadcast("permission_request", json!({
         "id": &id,
         "tool_name": &tool_name,
         "session_id": &session_id,
+        "timeout_secs": timeout_secs,
     }));
     let _ = state.notify_tray.send(());
 
@@ -895,11 +943,32 @@ async fn api_permission_request(
         }
     }
 
-    // Long-poll: wait for decision (timeout 600s)
+    // Countdown SSE: broadcast remaining time every 10s
+    let countdown_sse = state.sse.clone();
+    let countdown_id = id.clone();
+    let countdown_handle = tokio::spawn(async move {
+        let mut remaining = timeout_secs;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            remaining = remaining.saturating_sub(10);
+            countdown_sse.broadcast("permission_countdown", json!({
+                "id": &countdown_id,
+                "remaining": remaining,
+                "total": timeout_secs,
+            }));
+            if remaining == 0 {
+                break;
+            }
+        }
+    });
+
+    // Long-poll: wait for decision
     let decision = tokio::time::timeout(
-        tokio::time::Duration::from_secs(600),
+        tokio::time::Duration::from_secs(timeout_secs),
         rx,
     ).await;
+
+    countdown_handle.abort(); // Stop countdown task
 
     match decision {
         Ok(Ok(d)) => {

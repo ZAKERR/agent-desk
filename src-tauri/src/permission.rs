@@ -24,6 +24,7 @@ pub struct PermissionRequest {
     pub tool_input: Value,
     pub permission_suggestions: Value,
     pub timestamp: f64,
+    pub timeout_secs: u64,
 }
 
 pub struct PermissionStore {

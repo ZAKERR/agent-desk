@@ -71,6 +71,9 @@ island:
   # 开机自启动
   autostart: false
 
+  # 权限审批超时 (秒, 超时自动拒绝)
+  permission_timeout_secs: 600
+
 # 通用设置
 general:
   # sessions_file: ""       # 留空则自动使用 exe 同目录下 sessions.json

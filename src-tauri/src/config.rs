@@ -173,6 +173,10 @@ pub struct IslandConfig {
     // Autostart
     #[serde(default)]
     pub autostart: bool,
+
+    // Permission timeout (seconds)
+    #[serde(default = "default_permission_timeout")]
+    pub permission_timeout_secs: u64,
 }
 
 impl Default for IslandConfig {
@@ -198,10 +202,12 @@ impl Default for IslandConfig {
             sound_notification: "exclamation".into(),
             sound_permission: "question".into(),
             autostart: false,
+            permission_timeout_secs: 600,
         }
     }
 }
 
+fn default_permission_timeout() -> u64 { 600 }
 fn default_hotkey() -> String { "Alt+D".into() }
 fn default_transparency() -> String { "off".into() }
 fn default_opacity() -> f64 { 0.75 }
