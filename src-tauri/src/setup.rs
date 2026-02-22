@@ -14,6 +14,7 @@ const HOOK_EVENTS: &[(&str, &str)] = &[
     ("Notification", "notification"),
     ("SessionStart", "session_start"),
     ("SessionEnd", "session_end"),
+    ("PermissionRequest", "permission_request"),
 ];
 
 /// Locate `agent-desk-hook.exe` next to the running executable.
@@ -116,9 +117,14 @@ pub fn ensure_hooks_configured() {
 
     for &(claude_event, hook_arg) in HOOK_EVENTS {
         let command = format!("{} --event {}", hook_cmd_path, hook_arg);
-        let entry = json!({
-            "hooks": [{ "type": "command", "command": command }]
-        });
+        // PermissionRequest is a long-poll: hook blocks until user responds.
+        // Needs a large timeout so Claude Code doesn't kill the hook early.
+        let hook_obj = if claude_event == "PermissionRequest" {
+            json!({ "type": "command", "command": command, "timeout": 600 })
+        } else {
+            json!({ "type": "command", "command": command })
+        };
+        let entry = json!({ "hooks": [hook_obj] });
 
         match hooks.get_mut(claude_event) {
             Some(Value::Array(arr)) => {

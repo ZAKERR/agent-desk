@@ -11,33 +11,35 @@ const TERMINAL_PROCESSES: &[&str] = &[
     "code.exe", // VS Code integrated terminal
 ];
 
-/// Never match these.
-const NON_TERMINAL_PROCESSES: &[&str] = &[
-    "explorer.exe", "searchhost.exe", "shellexperiencehost.exe",
-    "searchui.exe", "startmenuexperiencehost.exe",
-];
 
 pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessInfo], pid: Option<u32>) -> bool {
     #[cfg(windows)]
     {
-        // Single Toolhelp32 snapshot for all process-tree walks
         let snapshot = ProcessSnapshot::capture();
 
-        if !cwd.is_empty() {
-            // Strategy 1: for each agent process, walk up to terminal, check title matches CWD
-            if let Some(hwnd) = find_terminal_for_cwd(cwd, cached_processes, &snapshot) {
-                return focus_hwnd(hwnd);
-            }
-
-            // Strategy 2: title matching (fallback, scans all windows)
-            if let Some(hwnd) = find_terminal_by_title(cwd) {
-                return focus_hwnd(hwnd);
+        // Strategy 1 (best): walk from the specific agent PID up to its terminal.
+        // This is the most reliable — directly traces the process tree.
+        if let Some(p) = pid {
+            if let Some(m) = walk_to_terminal(&snapshot, p) {
+                tracing::debug!("focus: Strategy 1 (PID walk) matched: PID {} → hwnd {}", p, m.hwnd);
+                let ok = focus_hwnd(m.hwnd);
+                if ok { if let Some((wt_pid, shell_pid)) = m.wt_tab { switch_wt_tab(wt_pid, shell_pid); } }
+                return ok;
             }
         }
 
-        // Strategy 3: direct PID walk (if caller provides a known-good PID)
-        if let Some(p) = pid {
-            if let Some(hwnd) = walk_to_terminal(&snapshot, p) {
+        if !cwd.is_empty() {
+            // Strategy 2: walk from each cached agent process, check terminal title vs CWD
+            if let Some(m) = find_terminal_for_cwd(cwd, cached_processes, &snapshot) {
+                tracing::debug!("focus: Strategy 2 (CWD process walk) matched: hwnd {}", m.hwnd);
+                let ok = focus_hwnd(m.hwnd);
+                if ok { if let Some((wt_pid, shell_pid)) = m.wt_tab { switch_wt_tab(wt_pid, shell_pid); } }
+                return ok;
+            }
+
+            // Strategy 3: scan all visible windows, match title vs CWD (only known terminals)
+            if let Some(hwnd) = find_terminal_by_title(cwd) {
+                tracing::debug!("focus: Strategy 3 (title scan) matched: hwnd {}", hwnd);
                 return focus_hwnd(hwnd);
             }
         }
@@ -45,6 +47,14 @@ pub fn find_and_focus_terminal_with_pid(cwd: &str, cached_processes: &[ProcessIn
 
     let _ = (cwd, cached_processes, pid);
     false
+}
+
+/// Result from walk_to_terminal: the terminal window + optional WT tab info.
+#[cfg(windows)]
+struct TerminalMatch {
+    hwnd: isize,
+    /// If the terminal is Windows Terminal: (wt_pid, target_shell_pid) for tab switching.
+    wt_tab: Option<(u32, u32)>,
 }
 
 /// Cached Toolhelp32 process snapshot — avoids creating one per walk level.
@@ -102,21 +112,21 @@ impl ProcessSnapshot {
 /// For each agent process, walk up to find its terminal window,
 /// then check if the terminal's title contains the target CWD.
 #[cfg(windows)]
-fn find_terminal_for_cwd(cwd: &str, cached: &[ProcessInfo], snapshot: &ProcessSnapshot) -> Option<isize> {
+fn find_terminal_for_cwd(cwd: &str, cached: &[ProcessInfo], snapshot: &ProcessSnapshot) -> Option<TerminalMatch> {
     let cwd_lower = cwd.replace('/', "\\").to_lowercase();
     let cwd_fwd = cwd.replace('\\', "/").to_lowercase();
     let basename = cwd.rsplit(&['/', '\\']).next().unwrap_or("").to_lowercase();
     let variants = vec![cwd_lower.clone(), cwd_fwd, basename.clone()];
 
     for proc in cached {
-        if let Some(hwnd) = walk_to_terminal(snapshot, proc.pid) {
+        if let Some(m) = walk_to_terminal(snapshot, proc.pid) {
             // Got the terminal window — check if its title contains the CWD
-            let title = get_window_title(hwnd);
+            let title = get_window_title(m.hwnd);
             let title_lower = title.to_lowercase();
             if variants.iter().any(|v| !v.is_empty() && title_lower.contains(v.as_str())) {
                 tracing::debug!("find_terminal_for_cwd: PID {} → terminal '{}' matches cwd '{}'",
                     proc.pid, title, cwd);
-                return Some(hwnd);
+                return Some(m);
             }
         }
     }
@@ -138,7 +148,7 @@ fn get_window_title(hwnd: isize) -> String {
 }
 
 #[cfg(windows)]
-fn walk_to_terminal(snapshot: &ProcessSnapshot, pid: u32) -> Option<isize> {
+fn walk_to_terminal(snapshot: &ProcessSnapshot, pid: u32) -> Option<TerminalMatch> {
     let mut current_pid = pid;
     tracing::debug!("walk_to_terminal: starting from PID {}", pid);
 
@@ -151,12 +161,14 @@ fn walk_to_terminal(snapshot: &ProcessSnapshot, pid: u32) -> Option<isize> {
             if let Some(hwnd) = find_window_for_pid(parent_pid) {
                 tracing::debug!("  → found terminal window hwnd={} for {} (PID {})", hwnd, parent_name, parent_pid);
 
-                // Windows Terminal: switch to the correct tab
-                // current_pid is the direct child of WT (the per-tab shell)
-                if parent_lower == "windowsterminal.exe" || parent_lower == "wt.exe" {
-                    switch_wt_tab(parent_pid, current_pid);
-                }
-                return Some(hwnd);
+                // Record WT tab info — caller switches tab AFTER focus_hwnd
+                // (doing it here would activate ALL WT windows during the search loop)
+                let wt_tab = if parent_lower == "windowsterminal.exe" || parent_lower == "wt.exe" {
+                    Some((parent_pid, current_pid))
+                } else {
+                    None
+                };
+                return Some(TerminalMatch { hwnd, wt_tab });
             }
             // Shell process inside WT — no visible window, keep walking
             tracing::debug!("  → {} (PID {}) is terminal but has no visible window", parent_name, parent_pid);
@@ -299,8 +311,6 @@ fn find_terminal_by_title(cwd: &str) -> Option<isize> {
 
     let variants = vec![cwd_lower, cwd_fwd, basename];
 
-    let mut best: Option<(i32, isize)> = None; // (priority, hwnd)
-
     unsafe {
         let mut hwnd = match GetTopWindow(None) {
             Ok(h) => h,
@@ -317,14 +327,12 @@ fn find_terminal_by_title(cwd: &str) -> Option<isize> {
 
                     if variants.iter().any(|v| !v.is_empty() && title.contains(v.as_str())) {
                         let proc_name = get_window_process_name(hwnd);
+                        if proc_name.is_empty() { continue; }
                         let proc_lower = proc_name.to_lowercase();
 
-                        if !NON_TERMINAL_PROCESSES.contains(&proc_lower.as_str()) {
-                            let priority = if TERMINAL_PROCESSES.contains(&proc_lower.as_str()) { 0 } else { 1 };
-                            match &best {
-                                Some((p, _)) if *p <= priority => {}
-                                _ => { best = Some((priority, hwnd.0 as isize)); }
-                            }
+                        // Only match known terminal processes — never focus random windows
+                        if TERMINAL_PROCESSES.contains(&proc_lower.as_str()) {
+                            return Some(hwnd.0 as isize);
                         }
                     }
                 }
@@ -336,14 +344,13 @@ fn find_terminal_by_title(cwd: &str) -> Option<isize> {
         }
     }
 
-    best.map(|(_, hwnd)| hwnd)
+    None
 }
 
 #[cfg(windows)]
 fn get_window_process_name(hwnd: windows::Win32::Foundation::HWND) -> String {
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::Win32::System::Threading::*;
-    use windows::Win32::System::ProcessStatus::*;
     use windows::Win32::Foundation::CloseHandle;
 
     unsafe {
@@ -356,12 +363,24 @@ fn get_window_process_name(hwnd: windows::Win32::Foundation::HWND) -> String {
             Err(_) => return String::new(),
         };
 
-        let mut buf = [0u16; 260];
-        let len = GetModuleBaseNameW(handle, None, &mut buf);
+        // Use QueryFullProcessImageNameW (works with PROCESS_QUERY_LIMITED_INFORMATION).
+        // GetModuleBaseNameW requires PROCESS_QUERY_INFORMATION | PROCESS_VM_READ
+        // which silently fails for some processes (e.g. explorer.exe), returning
+        // empty string that passes the NON_TERMINAL filter → focus wrong window.
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
         let _ = CloseHandle(handle);
 
-        if len > 0 {
-            String::from_utf16_lossy(&buf[..len as usize])
+        if ok.is_ok() && len > 0 {
+            let full_path = String::from_utf16_lossy(&buf[..len as usize]);
+            // Extract just the filename from the full path
+            full_path.rsplit('\\').next().unwrap_or("").to_string()
         } else {
             String::new()
         }

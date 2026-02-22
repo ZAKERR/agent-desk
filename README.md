@@ -1,5 +1,7 @@
 # Agent Desk
 
+[English](#agent-desk) | [中文](README_CN.md)
+
 Universal CLI agent monitor — a desktop Dynamic Island widget for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and future coding agents.
 
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue)
