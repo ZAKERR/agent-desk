@@ -1,3 +1,5 @@
+#[macro_use]
+mod utils;
 mod config;
 mod events;
 mod session;
@@ -18,7 +20,8 @@ use std::sync::Arc;
 use tauri::Manager;
 
 pub fn run() {
-    tracing_subscriber::fmt::init();
+    // Structured logging: console + rolling JSON file in %APPDATA%/agent-desk/logs/
+    init_logging();
 
     let cfg = config::load_config();
     setup::ensure_hooks_configured();
@@ -44,6 +47,9 @@ pub fn run() {
 
     // Give the HTTP server a moment to bind
     std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Spawn hook daemon (persistent TCP relay for lower latency)
+    setup::spawn_hook_daemon(port);
 
     // Build Tauri app
     tauri::Builder::default()
@@ -123,4 +129,52 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Initialize tracing with console output + rolling JSON file.
+fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // Log directory: %APPDATA%/agent-desk/logs/
+    let log_dir = std::env::var("APPDATA")
+        .map(|a| std::path::PathBuf::from(a).join("agent-desk").join("logs"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("logs"));
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    // Rolling daily file appender (JSON format)
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "agent-desk.log");
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_writer(file_appender)
+        .with_target(true)
+        .with_ansi(false);
+
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .compact();
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+
+    // Clean up old log files (> 7 days)
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified < cutoff {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
 }

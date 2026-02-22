@@ -24,6 +24,33 @@ fn hook_binary_path() -> Option<PathBuf> {
     hook.exists().then_some(hook)
 }
 
+/// Spawn the hook daemon process (persistent TCP relay).
+/// The daemon reuses HTTP connections for lower per-hook latency.
+pub fn spawn_hook_daemon(port: u16) {
+    let hook_path = match hook_binary_path() {
+        Some(p) => p,
+        None => {
+            tracing::debug!("Hook binary not found, skipping daemon spawn");
+            return;
+        }
+    };
+
+    use std::process::Command;
+    match Command::new(&hook_path)
+        .args(["--daemon", "--port", &port.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!("Hook daemon spawned (PID {})", child.id());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to spawn hook daemon: {}", e);
+        }
+    }
+}
+
 /// `%USERPROFILE%/.claude/settings.json`
 fn claude_settings_path() -> Option<PathBuf> {
     let home = std::env::var("USERPROFILE")

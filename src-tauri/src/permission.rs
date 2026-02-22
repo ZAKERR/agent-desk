@@ -50,15 +50,15 @@ impl PermissionStore {
     ) -> oneshot::Receiver<PermissionDecisionKind> {
         let (tx, rx) = oneshot::channel();
         let id = req.id.clone();
-        self.requests.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), req);
-        self.senders.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        mutex_lock!(self.requests).insert(id.clone(), req);
+        mutex_lock!(self.senders).insert(id, tx);
         rx
     }
 
     /// Send a decision for a pending request. Returns true if sent.
     pub fn respond(&self, id: &str, decision: PermissionDecisionKind) -> bool {
-        self.requests.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
-        if let Some(tx) = self.senders.lock().unwrap_or_else(|e| e.into_inner()).remove(id) {
+        mutex_lock!(self.requests).remove(id);
+        if let Some(tx) = mutex_lock!(self.senders).remove(id) {
             tx.send(decision).is_ok()
         } else {
             false
@@ -67,12 +67,12 @@ impl PermissionStore {
 
     /// Get all pending requests (for UI display).
     pub fn get_pending(&self) -> Vec<PermissionRequest> {
-        self.requests.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
+        mutex_lock!(self.requests).values().cloned().collect()
     }
 
     /// Clean up a request (e.g. on timeout).
     pub fn remove(&self, id: &str) {
-        self.requests.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
-        self.senders.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        mutex_lock!(self.requests).remove(id);
+        mutex_lock!(self.senders).remove(id);
     }
 }

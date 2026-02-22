@@ -56,7 +56,7 @@ impl EventStore {
     pub fn get_events(&self, after_ts: f64) -> Vec<Event> {
         self.refresh_cache();
 
-        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+        let cache = read_lock!(self.cache);
         if after_ts > 0.0 {
             cache.events.iter()
                 .filter(|e| !e.cleared && e.ts > after_ts)
@@ -78,7 +78,7 @@ impl EventStore {
 
         // Check if refresh needed
         {
-            let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+            let cache = read_lock!(self.cache);
             if cache.last_mtime == current_mtime && cache.last_size == current_size {
                 return;
             }
@@ -86,7 +86,7 @@ impl EventStore {
 
         // Re-read file
         let events = self.read_file();
-        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = write_lock!(self.cache);
         cache.events = events;
         cache.last_mtime = current_mtime;
         cache.last_size = current_size;
@@ -131,7 +131,7 @@ impl EventStore {
         }
 
         // Update in-memory cache
-        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = write_lock!(self.cache);
         cache.events.push(event);
         // Update metadata so next refresh_cache() doesn't re-read
         if let Ok(meta) = fs::metadata(&self.path) {
@@ -142,7 +142,7 @@ impl EventStore {
 
     /// Mark all events as cleared.
     pub fn clear_all(&self) {
-        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = write_lock!(self.cache);
         for evt in &mut cache.events {
             evt.cleared = true;
         }
@@ -171,7 +171,7 @@ impl EventStore {
             .as_secs_f64();
         let cutoff = now - self.max_age as f64;
 
-        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = write_lock!(self.cache);
         cache.events.retain(|e| e.ts >= cutoff);
 
         if let Ok(mut file) = fs::File::create(&self.path) {

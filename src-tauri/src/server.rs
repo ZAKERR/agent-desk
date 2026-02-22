@@ -184,7 +184,7 @@ pub async fn run_server(state: Arc<AppState>) {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
             let cutoff = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() - 5.0;
-            let mut cache = dedup_state.dedup_cache.write().unwrap_or_else(|e| e.into_inner());
+            let mut cache = write_lock!(dedup_state.dedup_cache);
             cache.retain(|_, ts| *ts > cutoff);
         }
     });
@@ -437,7 +437,7 @@ async fn api_status(State(state): State<Arc<AppState>>) -> Json<Value> {
         .unwrap_or_default()
         .as_secs_f64();
     let recent = state.event_store.get_events(now - 300.0).len();
-    let last_seen = *state.last_seen_ts.read().unwrap_or_else(|e| e.into_inner());
+    let last_seen = *read_lock!(state.last_seen_ts);
     let unread_count = state.event_store.get_events(last_seen).len();
     if let Some(obj) = status.as_object_mut() {
         obj.insert("recent_events".to_string(), json!(recent));
@@ -494,7 +494,7 @@ async fn api_hook(
         if !sid.is_empty() {
             let dedup_key = format!("{}:{}", sid, ev);
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
-            let mut cache = state.dedup_cache.write().unwrap_or_else(|e| e.into_inner());
+            let mut cache = write_lock!(state.dedup_cache);
             if let Some(&last) = cache.get(&dedup_key) {
                 if now - last < 0.5 {
                     return Json(json!({ "ok": true, "dedup": true }));
@@ -714,8 +714,8 @@ async fn api_signal(
                 crate::tray::send_notification(handle, &title, &toast_body);
                 if state.live_sound_enabled.load(Ordering::Relaxed) {
                     let st = match event {
-                        HookEvent::Stop => state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone(),
-                        _ => state.live_sound_notification.read().unwrap_or_else(|e| e.into_inner()).clone(),
+                        HookEvent::Stop => read_lock!(state.live_sound_stop).clone(),
+                        _ => read_lock!(state.live_sound_notification).clone(),
                     };
                     crate::tray::play_notification_sound(&st);
                 }
@@ -963,7 +963,7 @@ async fn api_permission_request(
             });
         }
         if state.live_sound_enabled.load(Ordering::Relaxed) {
-            let st = state.live_sound_permission.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let st = read_lock!(state.live_sound_permission).clone();
             crate::tray::play_notification_sound(&st);
         }
     }
@@ -1087,7 +1087,7 @@ async fn api_permissions(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 /// Temporarily unregister hotkey so JS can capture key combos.
 async fn api_hotkey_capture(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let hotkey = state.current_hotkey.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let hotkey = read_lock!(state.current_hotkey).clone();
     if let Some(handle) = state.app_handle.get() {
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         if let Ok(s) = hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
@@ -1119,7 +1119,7 @@ async fn api_hotkey_save(
         let gs = handle.global_shortcut();
 
         // Unregister old (might already be unregistered by capture)
-        let old = state.current_hotkey.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let old = read_lock!(state.current_hotkey).clone();
         if let Ok(old_s) = old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
             let _ = gs.unregister(old_s);
         }
@@ -1135,7 +1135,7 @@ async fn api_hotkey_save(
 
         match reg {
             Ok(_) => {
-                *state.current_hotkey.write().unwrap_or_else(|e| e.into_inner()) = new_hotkey.to_string();
+                *write_lock!(state.current_hotkey) = new_hotkey.to_string();
                 // Write to config file (blocking I/O off tokio thread)
                 let hk = new_hotkey.to_string();
                 tokio::task::spawn_blocking(move || {
@@ -1167,11 +1167,11 @@ async fn api_hotkey_save(
 // ─── General settings endpoints ─────────────────────────
 
 async fn api_settings_get(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let hotkey = state.current_hotkey.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let hotkey = read_lock!(state.current_hotkey).clone();
     let sound_enabled = state.live_sound_enabled.load(Ordering::Relaxed);
-    let sound_stop = state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let sound_notification = state.live_sound_notification.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let sound_permission = state.live_sound_permission.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let sound_stop = read_lock!(state.live_sound_stop).clone();
+    let sound_notification = read_lock!(state.live_sound_notification).clone();
+    let sound_permission = read_lock!(state.live_sound_permission).clone();
     let autostart = state.app_handle.get()
         .and_then(|h| {
             use tauri_plugin_autostart::ManagerExt;
@@ -1197,13 +1197,13 @@ async fn api_settings_save(
         state.live_sound_enabled.store(v, Ordering::Relaxed);
     }
     if let Some(v) = body.get("sound_stop").and_then(|v| v.as_str()) {
-        *state.live_sound_stop.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+        *write_lock!(state.live_sound_stop) = v.to_string();
     }
     if let Some(v) = body.get("sound_notification").and_then(|v| v.as_str()) {
-        *state.live_sound_notification.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+        *write_lock!(state.live_sound_notification) = v.to_string();
     }
     if let Some(v) = body.get("sound_permission").and_then(|v| v.as_str()) {
-        *state.live_sound_permission.write().unwrap_or_else(|e| e.into_inner()) = v.to_string();
+        *write_lock!(state.live_sound_permission) = v.to_string();
     }
 
     // Autostart toggle via plugin

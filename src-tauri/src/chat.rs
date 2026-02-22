@@ -99,7 +99,7 @@ impl ChatReader {
     ) -> (Vec<ChatMessage>, usize) {
         self.ensure_parsed(session_id, cwd);
         let cache_key = format!("{}:{}", session_id, cwd);
-        let cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache_map = mutex_lock!(self.cache);
         if let Some(entry) = cache_map.get(&cache_key) {
             let total = entry.messages.len();
             if after >= total {
@@ -121,7 +121,7 @@ impl ChatReader {
     ) -> (Vec<EnrichedMessage>, usize) {
         self.ensure_parsed(session_id, cwd);
         let cache_key = format!("{}:{}", session_id, cwd);
-        let cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache_map = mutex_lock!(self.cache);
         if let Some(entry) = cache_map.get(&cache_key) {
             let total = entry.enriched.len();
             if after >= total {
@@ -142,7 +142,7 @@ impl ChatReader {
         }
 
         let cache_key = format!("{}:{}", session_id, cwd);
-        let mut cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache_map = mutex_lock!(self.cache);
         let entry = cache_map.entry(cache_key).or_insert_with(|| SessionCache {
             offset: 0,
             messages: Vec::new(),
@@ -207,7 +207,7 @@ impl ChatReader {
 
     /// Evict session caches not accessed within `max_age`.
     pub fn evict_stale(&self, max_age: Duration) {
-        let mut cache_map = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache_map = mutex_lock!(self.cache);
         let cutoff = Instant::now() - max_age;
         cache_map.retain(|_, entry| entry.last_accessed >= cutoff);
     }

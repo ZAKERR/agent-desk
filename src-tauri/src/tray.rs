@@ -279,7 +279,7 @@ pub fn update_tray(
     let new_hash = hasher.finish();
 
     let should_rebuild = {
-        let mut last = LAST_TRAY_HASH.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = mutex_lock!(LAST_TRAY_HASH);
         if *last == new_hash {
             false
         } else {

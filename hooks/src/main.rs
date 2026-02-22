@@ -5,11 +5,16 @@
 //!
 //! Usage:
 //!   agent-desk-hook --event stop [--port 15924]
+//!   agent-desk-hook --daemon [--port 15924]
 //!
 //! Handles all hook types:
 //!   Light (→ /api/hook):  user_prompt, pre_tool
 //!   Heavy (→ /api/signal): stop, notification, session_start, session_end
 //!   Permission (→ /api/permission-request): permission_request (long-poll, stdout response)
+//!
+//! Daemon mode: listens on port+1, reuses HTTP connections for lower latency.
+
+mod daemon;
 
 use std::io::Read;
 use std::process;
@@ -17,9 +22,10 @@ use std::process;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Parse --event and --port
+    // Parse --event, --port, --daemon
     let mut event = String::new();
     let mut port: u16 = 15924;
+    let mut daemon_mode = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -35,13 +41,23 @@ fn main() {
                     port = args[i].parse().unwrap_or(15924);
                 }
             }
+            "--daemon" => {
+                daemon_mode = true;
+            }
             _ => {}
         }
         i += 1;
     }
 
+    // Daemon mode: run persistent TCP relay
+    if daemon_mode {
+        daemon::run(port);
+        return;
+    }
+
     if event.is_empty() {
         eprintln!("Usage: agent-desk-hook --event <event_type> [--port <port>]");
+        eprintln!("       agent-desk-hook --daemon [--port <port>]");
         process::exit(1);
     }
 
@@ -61,18 +77,10 @@ fn main() {
         obj.insert("hook_pid".into(), serde_json::json!(std::process::id()));
     }
 
-    // Route to the appropriate endpoint
+    // Validate event type
     match event.as_str() {
-        // Light hooks → /api/hook (just status update, no event log)
-        "user_prompt" | "pre_tool" => {
-            // Known light event
-        }
-        "permission_request" => {
-            // Known permission event (handled below)
-        }
-        "stop" | "notification" | "session_start" | "session_end" => {
-            // Known heavy event (handled below)
-        }
+        "user_prompt" | "pre_tool" | "permission_request"
+        | "stop" | "notification" | "session_start" | "session_end" => {}
         other => {
             if std::env::var("AGENT_DESK_DEBUG").is_ok() {
                 eprintln!("agent-desk-hook: unrecognized event '{}', forwarding to /api/signal", other);
@@ -80,8 +88,21 @@ fn main() {
         }
     }
 
-    // Route to the appropriate endpoint
-    match event.as_str() {
+    // Try daemon relay first (fast path — reuses HTTP connections)
+    if let Some(response) = daemon::try_send(port, &data) {
+        if !response.is_empty() && event == "permission_request" {
+            println!("{}", response);
+        }
+        return;
+    }
+
+    // Fallback: direct HTTP (cold path — new connection per request)
+    send_direct(port, &event, &data);
+}
+
+/// Direct HTTP send (fallback when daemon is not running).
+fn send_direct(port: u16, event: &str, data: &serde_json::Value) {
+    match event {
         "user_prompt" | "pre_tool" => {
             let url = format!("http://127.0.0.1:{}/api/hook?event={}", port, event);
             let agent = ureq::Agent::config_builder()
@@ -91,7 +112,7 @@ fn main() {
 
             let result = agent.post(&url)
                 .header("Content-Type", "application/json")
-                .send_json(&data);
+                .send_json(data);
 
             if let Err(e) = result {
                 if std::env::var("AGENT_DESK_DEBUG").is_ok() {
@@ -99,10 +120,8 @@ fn main() {
                 }
             }
         }
-        // Permission request → /api/permission-request (long-poll, stdout response)
         "permission_request" => {
             let url = format!("http://127.0.0.1:{}/api/permission-request", port);
-            // Long timeout: wait for user to respond (up to 660s)
             let agent = ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(660)))
                 .build()
@@ -110,25 +129,21 @@ fn main() {
 
             let result = agent.post(&url)
                 .header("Content-Type", "application/json")
-                .send_json(&data);
+                .send_json(data);
 
             match result {
                 Ok(mut resp) => {
-                    // Read response body and write to stdout for Claude Code
                     if let Ok(body) = resp.body_mut().read_to_string() {
                         println!("{}", body);
                     }
                 }
                 Err(e) => {
-                    // Server not running or timeout — exit silently
                     if std::env::var("AGENT_DESK_DEBUG").is_ok() {
                         eprintln!("agent-desk-hook: {} -> {}", url, e);
                     }
-                    // Don't output anything → Claude Code falls back to default behavior
                 }
             }
         }
-        // Heavy hooks → /api/signal (full pipeline)
         _ => {
             let url = format!("http://127.0.0.1:{}/api/signal", port);
             let agent = ureq::Agent::config_builder()
@@ -138,7 +153,7 @@ fn main() {
 
             let result = agent.post(&url)
                 .header("Content-Type", "application/json")
-                .send_json(&data);
+                .send_json(data);
 
             if let Err(e) = result {
                 if std::env::var("AGENT_DESK_DEBUG").is_ok() {
