@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::protocol::HookEvent;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: String,
     pub ts: f64,
-    pub event: String,
+    pub event: HookEvent,
     pub session_id: String,
     pub cwd: String,
     pub message: String,

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, rejection::JsonRejection},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         Json,
@@ -28,6 +28,10 @@ use crate::session::{SessionTracker, SessionUpdate};
 use crate::chat::ChatReader;
 use crate::permission::PermissionStore;
 use crate::sse::SSEBroadcaster;
+use crate::protocol::{
+    HookEvent, SessionStatus, PermissionDecisionKind,
+    SignalPayload, HookPayload, PermissionRequestPayload, PermissionRespondPayload,
+};
 
 pub struct AppState {
     pub config: Arc<Config>,
@@ -214,16 +218,6 @@ pub async fn run_server(state: Arc<AppState>) {
         .expect("HTTP server error");
 }
 
-// --- Atomic config write helper ---
-
-/// Write config file atomically: write to .tmp, then rename.
-fn atomic_write_config(path: &std::path::Path, content: &str) {
-    let tmp = path.with_extension("yaml.tmp");
-    if std::fs::write(&tmp, content).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
-}
-
 // --- Shared helpers ---
 
 pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
@@ -242,7 +236,7 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
     // Build CWD → tracker info lookup (normalized)
     let mut cwd_tracker: HashMap<String, Vec<&crate::session::SessionInfo>> = HashMap::new();
     for (_sid, info) in &tracked {
-        if info.status == "ended" || matched_sessions.contains(&info.session_id) {
+        if info.status == SessionStatus::Ended || matched_sessions.contains(&info.session_id) {
             continue;
         }
         let tcwd = info.cwd.replace('/', "\\").to_lowercase();
@@ -271,10 +265,10 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
 
         if let Some(info) = tinfo {
             // CWD-matched: merge process + tracker
-            let status = match info.status.as_str() {
-                "waiting" | "idle" => "waiting",
-                "stopped" | "ended" => "stopped",
-                "active" => "active",
+            let status = match info.status {
+                SessionStatus::Waiting | SessionStatus::Idle => "waiting",
+                SessionStatus::Stopped | SessionStatus::Ended => "stopped",
+                SessionStatus::Active => "active",
                 _ => "waiting",
             };
             let display_cwd = if info.cwd.is_empty() { &proc.cwd } else { &info.cwd };
@@ -300,7 +294,7 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
     // Phase 2: pair unmatched processes with unmatched tracker entries (by agent type).
     // Scanner CWD is unreliable, but a running process proves the session exists.
     let mut unmatched_trackers: Vec<&crate::session::SessionInfo> = tracked.values()
-        .filter(|i| i.status != "ended" && !matched_sessions.contains(&i.session_id))
+        .filter(|i| i.status != SessionStatus::Ended && !matched_sessions.contains(&i.session_id))
         .collect();
     // Sort: most recently updated first
     unmatched_trackers.sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
@@ -310,10 +304,10 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
         if let Some(idx) = unmatched_trackers.iter().position(|_i| true) {
             let info = unmatched_trackers.remove(idx);
             matched_sessions.insert(info.session_id.clone());
-            let status = match info.status.as_str() {
-                "waiting" | "idle" => "waiting",
-                "stopped" | "ended" => "stopped",
-                "active" => "active",
+            let status = match info.status {
+                SessionStatus::Waiting | SessionStatus::Idle => "waiting",
+                SessionStatus::Stopped | SessionStatus::Ended => "stopped",
+                SessionStatus::Active => "active",
                 _ => "waiting",
             };
             result.push(json!({
@@ -436,27 +430,28 @@ async fn api_stream(
 
 #[derive(Deserialize)]
 struct HookQuery {
-    event: Option<String>,
+    event: Option<HookEvent>,
 }
 
 async fn api_hook(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HookQuery>,
-    Json(body): Json<Value>,
+    body: Result<Json<HookPayload>, JsonRejection>,
 ) -> Json<Value> {
-    let event = q.event.unwrap_or_default();
-    let sid = body
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("{}", e) })),
+    };
+    let event = q.event.as_ref();
+    let sid = &payload.session_id;
+    let cwd = &payload.cwd;
 
-    if !sid.is_empty() && (event == "user_prompt" || event == "pre_tool") {
+    if !sid.is_empty() && matches!(event, Some(HookEvent::UserPrompt) | Some(HookEvent::PreTool)) {
         state.session_tracker.update(
             sid,
             SessionUpdate {
-                status: Some("active".to_string()),
-                cwd: Some(cwd.to_string()),
+                status: Some(SessionStatus::Active),
+                cwd: Some(cwd.clone()),
                 // Clear stale notification on new activity
                 notification_type: Some(String::new()),
                 notification_message: Some(String::new()),
@@ -482,64 +477,51 @@ async fn api_hook(
 /// Pipeline: session update → event log → SSE broadcast → remote channels.
 async fn api_signal(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<Value>,
+    body: Result<Json<SignalPayload>, JsonRejection>,
 ) -> Json<Value> {
-    let event = body
-        .get("event")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let sid = body
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let ntype = body
-        .get("notification_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let nmsg = body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let last_msg = body
-        .get("last_assistant_message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let model = body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("{}", e) })),
+    };
+    let event = &payload.event;
+    let sid = &payload.session_id;
+    let cwd = &payload.cwd;
+    let ntype = &payload.notification_type;
+    let nmsg = &payload.message;
+    let last_msg = &payload.last_assistant_message;
+    let model = &payload.model;
+
     // --- 1. Update session state ---
     if !sid.is_empty() {
         match event {
-            "session_start" => {
+            HookEvent::SessionStart => {
                 state.session_tracker.register(
                     sid,
                     cwd,
-                    if model.is_empty() { None } else { Some(model) },
+                    if model.is_empty() { None } else { Some(model.as_str()) },
                     None,
                 );
             }
-            "session_end" => {
+            HookEvent::SessionEnd => {
                 state.session_tracker.update(
                     sid,
                     SessionUpdate {
-                        status: Some("ended".into()),
-                        cwd: Some(cwd.into()),
+                        status: Some(SessionStatus::Ended),
+                        cwd: Some(cwd.clone()),
                         ..Default::default()
                     },
                 );
             }
-            "stop" => {
+            HookEvent::Stop => {
                 state.session_tracker.update(
                     sid,
                     SessionUpdate {
-                        status: Some("waiting".into()),
-                        cwd: Some(cwd.into()),
+                        status: Some(SessionStatus::Waiting),
+                        cwd: Some(cwd.clone()),
                         last_message: if last_msg.is_empty() {
                             None
                         } else {
-                            Some(last_msg.into())
+                            Some(last_msg.clone())
                         },
                         // Clear notification on stop (back to prompt)
                         notification_type: Some(String::new()),
@@ -548,26 +530,26 @@ async fn api_signal(
                     },
                 );
             }
-            "notification" => {
+            HookEvent::Notification => {
                 let status = if ntype == "permission_prompt" {
-                    "waiting"
+                    SessionStatus::Waiting
                 } else {
-                    "idle"
+                    SessionStatus::Idle
                 };
                 state.session_tracker.update(
                     sid,
                     SessionUpdate {
-                        status: Some(status.into()),
-                        cwd: Some(cwd.into()),
+                        status: Some(status),
+                        cwd: Some(cwd.clone()),
                         notification_type: if ntype.is_empty() {
                             None
                         } else {
-                            Some(ntype.into())
+                            Some(ntype.clone())
                         },
                         notification_message: if nmsg.is_empty() {
                             None
                         } else {
-                            Some(nmsg.into())
+                            Some(nmsg.clone())
                         },
                         ..Default::default()
                     },
@@ -578,7 +560,7 @@ async fn api_signal(
     }
 
     // --- 2. Format human-readable message ---
-    let short_sid = if sid.len() > 8 { &sid[..8] } else { sid };
+    let short_sid = if sid.len() > 8 { &sid[..8] } else { sid.as_str() };
     let message = format_event_message(event, short_sid, cwd, ntype, nmsg, last_msg, model);
 
     // --- 3. Append to event log ---
@@ -588,21 +570,21 @@ async fn api_signal(
         .as_secs_f64();
     let short_id = &uuid::Uuid::new_v4().to_string()[..6];
     let level = match event {
-        "session_start" | "session_end" => 1,
-        "stop" => 2,
-        "notification" => 3,
+        HookEvent::SessionStart | HookEvent::SessionEnd => 1,
+        HookEvent::Stop => 2,
+        HookEvent::Notification => 3,
         _ => 1,
     };
 
     let evt = Event {
         id: format!("evt_{}_{}", now as u64, short_id),
         ts: now,
-        event: event.to_string(),
-        session_id: sid.to_string(),
-        cwd: cwd.to_string(),
+        event: event.clone(),
+        session_id: sid.clone(),
+        cwd: cwd.clone(),
         message: message.clone(),
-        notification_type: ntype.to_string(),
-        last_assistant_message: last_msg.to_string(),
+        notification_type: ntype.clone(),
+        last_assistant_message: last_msg.clone(),
         level,
         cleared: false,
     };
@@ -628,11 +610,11 @@ async fn api_signal(
     let _ = state.notify_tray.send(());
 
     // --- 6. Windows toast notification for stop and notification events ---
-    if event == "stop" || event == "notification" {
+    if *event == HookEvent::Stop || *event == HookEvent::Notification {
         if let Some(handle) = state.app_handle.get() {
             let proj = cwd.rsplit(['/', '\\']).next().unwrap_or(cwd);
-            let (title, body) = match event {
-                "stop" => {
+            let (title, toast_body) = match event {
+                HookEvent::Stop => {
                     let truncated = if last_msg.chars().count() > 200 {
                         format!("{}...", last_msg.chars().take(197).collect::<String>())
                     } else {
@@ -641,7 +623,7 @@ async fn api_signal(
                     (format!("\u{2705} \u{4efb}\u{52a1}\u{5b8c}\u{6210} \u{2014} {}", proj), truncated)
                     // ✅ 任务完成 — project
                 }
-                "notification" => match ntype {
+                HookEvent::Notification => match ntype.as_str() {
                     "permission_prompt" => {
                         (format!("\u{1f514} \u{9700}\u{8981}\u{64cd}\u{4f5c} \u{2014} {}", proj), nmsg.to_string())
                         // 🔔 需要操作 — project
@@ -659,10 +641,10 @@ async fn api_signal(
                 _ => (String::new(), String::new()),
             };
             if !title.is_empty() {
-                crate::tray::send_notification(handle, &title, &body);
+                crate::tray::send_notification(handle, &title, &toast_body);
                 if state.live_sound_enabled.load(Ordering::Relaxed) {
                     let st = match event {
-                        "stop" => state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone(),
+                        HookEvent::Stop => state.live_sound_stop.read().unwrap_or_else(|e| e.into_inner()).clone(),
                         _ => state.live_sound_notification.read().unwrap_or_else(|e| e.into_inner()).clone(),
                     };
                     crate::tray::play_notification_sound(&st);
@@ -685,7 +667,7 @@ async fn api_signal(
 
 /// Format a human-readable event message (same logic as Python's format_message).
 fn format_event_message(
-    event: &str,
+    event: &HookEvent,
     short_sid: &str,
     cwd: &str,
     ntype: &str,
@@ -694,7 +676,7 @@ fn format_event_message(
     model: &str,
 ) -> String {
     match event {
-        "stop" => {
+        HookEvent::Stop => {
             let truncated = if last_msg.chars().count() > 300 {
                 format!("{}...", last_msg.chars().take(297).collect::<String>())
             } else {
@@ -702,16 +684,16 @@ fn format_event_message(
             };
             format!("[Done] {}\n{}\n{}", short_sid, cwd, truncated)
         }
-        "notification" => match ntype {
+        HookEvent::Notification => match ntype {
             "permission_prompt" => format!("[Confirm] {}\n{}", short_sid, nmsg),
             "idle_prompt" => format!("[Idle] {} waiting for input", short_sid),
             _ => format!("[Notice] {}\n{}", short_sid, nmsg),
         },
-        "session_start" => {
+        HookEvent::SessionStart => {
             let m = if model.is_empty() { "unknown" } else { model };
             format!("[Start] {} | {} | {}", short_sid, m, cwd)
         }
-        "session_end" => format!("[End] {}", short_sid),
+        HookEvent::SessionEnd => format!("[End] {}", short_sid),
         _ => format!("[{}] {}", event, short_sid),
     }
 }
@@ -861,13 +843,17 @@ async fn api_island_hide(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// Hook binary POSTs here and blocks until user responds (long-poll).
 async fn api_permission_request(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<Value>,
+    body: Result<Json<PermissionRequestPayload>, JsonRejection>,
 ) -> Json<Value> {
-    let session_id = body.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let tool_name = body.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let tool_input = body.get("tool_input").cloned().unwrap_or(json!({}));
-    let permission_suggestions = body.get("permission_suggestions").cloned().unwrap_or(json!([]));
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("{}", e) })),
+    };
+    let session_id = payload.session_id;
+    let cwd = payload.cwd;
+    let tool_name = payload.tool_name;
+    let tool_input = payload.tool_input;
+    let permission_suggestions = payload.permission_suggestions;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
@@ -918,15 +904,10 @@ async fn api_permission_request(
     match decision {
         Ok(Ok(d)) => {
             // Build the hookSpecificOutput that Claude Code expects
-            let behavior = match d.decision.as_str() {
-                "allow" => "approve",
-                "always_allow" => "approve",
-                "deny" => "deny",
-                other => other,
-            };
+            let behavior = d.to_behavior();
 
             // For "always_allow", include updated_permissions from original suggestions
-            let updated_permissions = if d.decision == "always_allow" {
+            let updated_permissions = if d == PermissionDecisionKind::AlwaysAllow {
                 permission_suggestions.clone()
             } else {
                 json!([])
@@ -961,16 +942,44 @@ async fn api_permission_request(
 /// UI calls this to send a decision.
 async fn api_permission_respond(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<Value>,
+    body: Result<Json<PermissionRespondPayload>, JsonRejection>,
 ) -> Json<Value> {
-    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let decision_str = body.get("decision").and_then(|v| v.as_str()).unwrap_or("deny");
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("{}", e) })),
+    };
+    let id = &payload.id;
+    let decision = payload.decision;
 
-    let decision = crate::permission::PermissionDecision {
-        decision: decision_str.to_string(),
+    // Look up the session_id before responding (respond removes the request)
+    let session_id = {
+        let pending = state.permissions.get_pending();
+        pending.iter().find(|r| r.id == *id).map(|r| r.session_id.clone())
     };
 
-    let ok = state.permissions.respond(id, decision);
+    let ok = state.permissions.respond(id, decision.clone());
+
+    // Update session status immediately so UI reflects the change
+    if ok {
+        if let Some(sid) = &session_id {
+            let new_status = match decision {
+                PermissionDecisionKind::Allow | PermissionDecisionKind::AlwaysAllow => SessionStatus::Active,
+                PermissionDecisionKind::Deny => SessionStatus::Waiting,
+            };
+            state.session_tracker.update(sid, SessionUpdate {
+                status: Some(new_status),
+                notification_type: Some(String::new()),
+                notification_message: Some(String::new()),
+                ..Default::default()
+            });
+            state.sse.broadcast("activity", json!({
+                "event": "permission_resolved",
+                "session_id": sid,
+                "decision": decision,
+            }));
+        }
+    }
+
     Json(json!({ "ok": ok }))
 }
 
@@ -1036,17 +1045,9 @@ async fn api_hotkey_save(
                 // Write to config file (blocking I/O off tokio thread)
                 let hk = new_hotkey.to_string();
                 tokio::task::spawn_blocking(move || {
-                    let path = crate::config::find_config_path();
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let new_content: String = content.lines().map(|line| {
-                            if line.trim_start().starts_with("hotkey:") {
-                                format!("  hotkey: \"{}\"", hk)
-                            } else {
-                                line.to_string()
-                            }
-                        }).collect::<Vec<_>>().join("\n");
-                        atomic_write_config(&path, &new_content);
-                    }
+                    crate::config::save_island_settings(&[
+                        ("hotkey", &format!("\"{}\"", hk)),
+                    ]);
                 });
                 tracing::info!("Hotkey changed to: {}", new_hotkey);
                 return Json(json!({ "ok": true, "hotkey": new_hotkey }));
@@ -1123,34 +1124,25 @@ async fn api_settings_save(
     // Write all changed fields to config.yaml (blocking I/O off tokio thread)
     let body_clone = body.clone();
     tokio::task::spawn_blocking(move || {
-        let path = crate::config::find_config_path();
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let new_content: String = content.lines().map(|line| {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("sound_enabled:") {
-                    if let Some(v) = body_clone.get("sound_enabled") {
-                        return format!("  sound_enabled: {}", v);
-                    }
-                } else if trimmed.starts_with("sound_stop:") {
-                    if let Some(v) = body_clone.get("sound_stop").and_then(|v| v.as_str()) {
-                        return format!("  sound_stop: \"{}\"", v);
-                    }
-                } else if trimmed.starts_with("sound_notification:") {
-                    if let Some(v) = body_clone.get("sound_notification").and_then(|v| v.as_str()) {
-                        return format!("  sound_notification: \"{}\"", v);
-                    }
-                } else if trimmed.starts_with("sound_permission:") {
-                    if let Some(v) = body_clone.get("sound_permission").and_then(|v| v.as_str()) {
-                        return format!("  sound_permission: \"{}\"", v);
-                    }
-                } else if trimmed.starts_with("autostart:") {
-                    if let Some(v) = body_clone.get("autostart") {
-                        return format!("  autostart: {}", v);
-                    }
-                }
-                line.to_string()
-            }).collect::<Vec<_>>().join("\n");
-            atomic_write_config(&path, &new_content);
+        let mut changes: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = body_clone.get("sound_enabled") {
+            changes.push(("sound_enabled", format!("{}", v)));
+        }
+        if let Some(v) = body_clone.get("sound_stop").and_then(|v| v.as_str()) {
+            changes.push(("sound_stop", format!("\"{}\"", v)));
+        }
+        if let Some(v) = body_clone.get("sound_notification").and_then(|v| v.as_str()) {
+            changes.push(("sound_notification", format!("\"{}\"", v)));
+        }
+        if let Some(v) = body_clone.get("sound_permission").and_then(|v| v.as_str()) {
+            changes.push(("sound_permission", format!("\"{}\"", v)));
+        }
+        if let Some(v) = body_clone.get("autostart") {
+            changes.push(("autostart", format!("{}", v)));
+        }
+        if !changes.is_empty() {
+            let refs: Vec<(&str, &str)> = changes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            crate::config::save_island_settings(&refs);
         }
     });
 

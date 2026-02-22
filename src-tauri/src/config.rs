@@ -302,21 +302,40 @@ fn config_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     // 1. Next to executable
-    dirs.push(app_dir().join("config"));
+    let exe_dir = app_dir();
+    dirs.push(exe_dir.join("config"));
 
-    // 2. Current working directory
+    // 2. Walk up from exe directory looking for config/ (handles dev builds
+    //    and autostart where CWD != project root). E.g. exe at
+    //    project/src-tauri/target/release/ → walks up to project/config/.
+    {
+        let mut ancestor = exe_dir.as_path();
+        for _ in 0..5 {
+            if let Some(parent) = ancestor.parent() {
+                let candidate = parent.join("config");
+                if candidate.is_dir() {
+                    dirs.push(candidate);
+                }
+                ancestor = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 3. Current working directory
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd.join("config"));
     }
 
-    // 3. Parent of CWD (covers running from src-tauri/ during development)
+    // 4. Parent of CWD (covers running from src-tauri/ during development)
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(parent) = cwd.parent() {
             dirs.push(parent.join("config"));
         }
     }
 
-    // 4. %APPDATA%/agent-desk/
+    // 5. %APPDATA%/agent-desk/
     if let Ok(appdata) = std::env::var("APPDATA") {
         dirs.push(PathBuf::from(appdata).join("agent-desk"));
     }
@@ -337,4 +356,41 @@ pub fn find_config_path() -> PathBuf {
     config_search_dirs().into_iter().next()
         .unwrap_or_else(|| PathBuf::from("config"))
         .join(name)
+}
+
+/// Write config file atomically: write to .tmp, then rename.
+pub fn atomic_write_config(path: &std::path::Path, content: &str) {
+    let tmp = path.with_extension("yaml.tmp");
+    if std::fs::write(&tmp, content).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Write island settings to config.yaml using line-based replacement.
+///
+/// Each entry is `(key, formatted_value)` where the key matches a YAML field
+/// name under the `island:` section, and `formatted_value` is the exact YAML
+/// value to write (including quotes for strings).
+///
+/// Example: `save_island_settings(&[("hotkey", "\"Alt+D\""), ("sound_enabled", "true")])`
+pub fn save_island_settings(settings: &[(&str, &str)]) {
+    let path = find_config_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let new_content: String = content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            for &(key, value) in settings {
+                if trimmed.starts_with(&format!("{}:", key)) {
+                    return format!("  {}: {}", key, value);
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    atomic_write_config(&path, &new_content);
 }

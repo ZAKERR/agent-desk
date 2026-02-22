@@ -7,11 +7,13 @@
 //! The UI calls `/api/permission-respond` which sends the decision through
 //! a oneshot channel back to the waiting hook handler.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
+
+use crate::protocol::PermissionDecisionKind;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PermissionRequest {
@@ -24,17 +26,11 @@ pub struct PermissionRequest {
     pub timestamp: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct PermissionDecision {
-    /// "allow" | "deny" | "always_allow"
-    pub decision: String,
-}
-
 pub struct PermissionStore {
     /// Pending requests (keyed by id).
     requests: Mutex<HashMap<String, PermissionRequest>>,
     /// Oneshot senders waiting for decisions (keyed by request id).
-    senders: Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>,
+    senders: Mutex<HashMap<String, oneshot::Sender<PermissionDecisionKind>>>,
 }
 
 impl PermissionStore {
@@ -50,7 +46,7 @@ impl PermissionStore {
     pub fn register(
         &self,
         req: PermissionRequest,
-    ) -> oneshot::Receiver<PermissionDecision> {
+    ) -> oneshot::Receiver<PermissionDecisionKind> {
         let (tx, rx) = oneshot::channel();
         let id = req.id.clone();
         self.requests.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), req);
@@ -59,7 +55,7 @@ impl PermissionStore {
     }
 
     /// Send a decision for a pending request. Returns true if sent.
-    pub fn respond(&self, id: &str, decision: PermissionDecision) -> bool {
+    pub fn respond(&self, id: &str, decision: PermissionDecisionKind) -> bool {
         self.requests.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         if let Some(tx) = self.senders.lock().unwrap_or_else(|e| e.into_inner()).remove(id) {
             tx.send(decision).is_ok()

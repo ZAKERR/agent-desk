@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::protocol::SessionStatus;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
@@ -14,7 +16,7 @@ pub struct SessionInfo {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub status: String,
+    pub status: SessionStatus,
     #[serde(default)]
     pub started_at: f64,
     #[serde(default)]
@@ -69,7 +71,7 @@ impl SessionTracker {
             session_id: session_id.to_string(),
             cwd: cwd.to_string(),
             model: model.map(|s| s.to_string()),
-            status: "idle".to_string(),
+            status: SessionStatus::Idle,
             started_at: now,
             updated_at: now,
             last_message: None,
@@ -91,7 +93,7 @@ impl SessionTracker {
                 session_id: session_id.to_string(),
                 cwd: String::new(),
                 model: None,
-                status: "unknown".to_string(),
+                status: SessionStatus::Unknown,
                 started_at: now,
                 updated_at: now,
                 last_message: None,
@@ -162,7 +164,7 @@ impl SessionTracker {
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let before = sessions.len();
         sessions.retain(|_, info| {
-            !(info.status == "ended" && info.updated_at < cutoff)
+            !(info.status == SessionStatus::Ended && info.updated_at < cutoff)
         });
         if sessions.len() < before {
             self.dirty.store(true, Ordering::Relaxed);
@@ -186,7 +188,7 @@ impl SessionTracker {
 /// Builder for session updates (avoids needing many optional params).
 #[derive(Default)]
 pub struct SessionUpdate {
-    pub status: Option<String>,
+    pub status: Option<SessionStatus>,
     pub cwd: Option<String>,
     pub last_message: Option<String>,
     pub notification_type: Option<String>,

@@ -65,6 +65,24 @@ fn main() {
     match event.as_str() {
         // Light hooks → /api/hook (just status update, no event log)
         "user_prompt" | "pre_tool" => {
+            // Known light event
+        }
+        "permission_request" => {
+            // Known permission event (handled below)
+        }
+        "stop" | "notification" | "session_start" | "session_end" => {
+            // Known heavy event (handled below)
+        }
+        other => {
+            if std::env::var("AGENT_DESK_DEBUG").is_ok() {
+                eprintln!("agent-desk-hook: unrecognized event '{}', forwarding to /api/signal", other);
+            }
+        }
+    }
+
+    // Route to the appropriate endpoint
+    match event.as_str() {
+        "user_prompt" | "pre_tool" => {
             let url = format!("http://127.0.0.1:{}/api/hook?event={}", port, event);
             let agent = ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(3)))

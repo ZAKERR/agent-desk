@@ -12,6 +12,7 @@ pub mod island;
 mod permission;
 mod chat;
 mod setup;
+pub mod protocol;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -56,14 +57,15 @@ pub fn run() {
             // Store AppHandle for notifications from api_signal
             let _ = state.app_handle.set(app.handle().clone());
 
-            // Sync OS autostart state to config
+            // Sync OS autostart state to config — only enable, never
+            // auto-disable.  On autostart the config dir may not be found
+            // (CWD != project root), so the default `autostart: false`
+            // would incorrectly remove the registry entry.
             {
                 use tauri_plugin_autostart::ManagerExt;
                 let al = app.autolaunch();
-                if state.config.island.autostart {
+                if state.config.island.autostart && !al.is_enabled().unwrap_or(false) {
                     let _ = al.enable();
-                } else {
-                    let _ = al.disable();
                 }
             }
 
