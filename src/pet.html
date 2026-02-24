@@ -247,18 +247,20 @@ html, body {
 .act-btn:hover { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.08); }
 
 .perm-btn {
-  padding: 5px 10px;
+  padding: 4px 8px;
   border: none;
   border-radius: 14px;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   cursor: pointer;
   transition: opacity 0.12s;
   white-space: nowrap;
 }
 .perm-btn:hover { opacity: 0.85; }
-.perm-btn.allow { background: rgba(255,255,255,0.9); color: #000; }
-.perm-btn.deny  { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.6); }
+.perm-btn.allow   { background: #34C759; color: #fff; }
+.perm-btn.session  { background: #007AFF; color: #fff; }
+.perm-btn.always  { background: #AF52DE; color: #fff; }
+.perm-btn.deny    { background: rgba(255,68,68,0.25); color: #FF4444; }
 
 .empty {
   color: rgba(255,255,255,0.15);
@@ -337,6 +339,37 @@ html, body {
   gap: 6px;
   padding: 8px 8px 0;
 }
+
+/* ─── Chat Permission Banner ─── */
+#chat-perm-banner {
+  display: none; flex-shrink: 0;
+  padding: 8px 10px;
+  background: rgba(217,120,87,0.08);
+  border-bottom: 1px solid rgba(217,120,87,0.15);
+}
+#chat-perm-banner.show { display: block; }
+.cpb-tool {
+  font-size: 11px; color: rgba(255,255,255,0.7);
+  margin-bottom: 4px;
+  display: flex; align-items: center; gap: 6px;
+}
+.cpb-tool .tool-name { font-size: 12px; }
+.cpb-input {
+  font-size: 10px; color: rgba(255,255,255,0.35);
+  font-family: 'Cascadia Code','Consolas',monospace;
+  margin-bottom: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cpb-opt {
+  padding: 5px 8px;
+  font-size: 11px; color: rgba(255,255,255,0.75);
+  cursor: pointer; border-radius: 6px;
+  transition: background 0.12s;
+}
+.cpb-opt:hover { background: rgba(255,255,255,0.08); }
+.cpb-opt.cpb-no { color: rgba(255,255,255,0.4); }
+.cpb-opt.cpb-terminal { color: rgba(102,153,255,0.7); font-style: italic; }
+.cpb-num { color: rgba(255,255,255,0.3); margin-right: 6px; font-size: 10px; }
 
 /* ─── Chat View ─── */
 #chat-view { display: none; flex-direction: column; height: calc(100vh - 38px); }
@@ -518,6 +551,7 @@ html, body {
         <span id="chat-title">Chat</span>
         <span id="chat-status"></span>
       </div>
+      <div id="chat-perm-banner"></div>
       <div id="chat-messages"></div>
       <div id="chat-input-area">
         <input id="chat-input" type="text" placeholder="Send a message..."
@@ -606,9 +640,9 @@ function doExpand(autoClose) {
 }
 function doCollapse() {
   if (!isExpanded) return;
+  if (chatSession) return; // Never auto-collapse while chat view is open
   isExpanded = false;
   if (autoCloseTimer) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
-  if (chatSession) closeChat();
   document.getElementById('panel').classList.remove('show');
   document.getElementById('pill').classList.remove('hide');
   fetch(`${BASE}/api/island/collapse`, { method: 'POST' }).catch(() => {});
@@ -623,8 +657,8 @@ document.addEventListener('mouseenter', () => {
   // User moved mouse into panel → cancel auto-close (wants to interact)
   if (autoCloseTimer) { clearTimeout(autoCloseTimer); autoCloseTimer = null; }
 });
-// Window blur (click outside / alt-tab) → collapse immediately
-window.addEventListener('blur', () => { if (isExpanded) doCollapse(); });
+// Window blur (click outside / alt-tab) → collapse, but NOT when chat view is open
+window.addEventListener('blur', () => { if (isExpanded && !chatSession) doCollapse(); });
 
 function hideIsland() {
   if (isExpanded) doCollapse();
@@ -758,23 +792,19 @@ function renderSessions() {
       sub = `<div class="sess-sub"${subCls}>${esc(label)}</div>`;
     }
 
-    // Actions
+    // Actions: permission sessions just get a badge, buttons are inside chat view
     let acts;
     if (pm) {
       acts = `<div class="sess-actions always">
-        <button class="act-btn" onclick="event.stopPropagation();openChat(${i})" title="Chat">&#x1F4AC;</button>
-        <button class="perm-btn deny" onclick="event.stopPropagation();rPerm('${pm.id}','deny')">Deny</button>
-        <button class="perm-btn allow" onclick="event.stopPropagation();rPerm('${pm.id}','allow')">Allow</button>
+        <span style="font-size:10px;color:${C.orange};font-weight:600;white-space:nowrap">Needs approval</span>
       </div>`;
     } else {
       acts = `<div class="sess-actions">
-        <button class="act-btn" onclick="event.stopPropagation();openChat(${i})" title="Chat">&#x1F4AC;</button>
-        <button class="act-btn" onclick="event.stopPropagation();focusSess(${i})" title="Focus">&#x1F4FA;</button>
         <button class="act-btn" onclick="event.stopPropagation();dismissSess(${i})" title="Dismiss">&#x1F4E6;</button>
       </div>`;
     }
 
-    return `<div class="sess-row" onclick="focusSess(${i})">
+    return `<div class="sess-row" onclick="openChat(${i})">
       <div class="ind">${ind}</div>
       <div class="sess-body">
         <div class="sess-name">${title}</div>
@@ -826,6 +856,7 @@ function validatePermission(raw) {
     cwd: raw.cwd || '',
     tool_name: raw.tool_name || '',
     tool_input: raw.tool_input || {},
+    permission_suggestions: raw.permission_suggestions || [],
     timestamp: raw.timestamp || 0,
     timeout_secs: raw.timeout_secs || 600,
   };
@@ -837,6 +868,51 @@ function rPerm(id, decision) {
   perms = perms.filter(p => p.id !== id);
   delete permCountdowns[id];
   renderSessions();
+  renderChatPermBanner();
+}
+
+/// Map a permission_suggestion to a human-readable label (mirrors Claude Code's terminal text).
+function suggestionLabel(s) {
+  if (s.type === 'setMode') {
+    if (s.mode === 'acceptEdits') return 'Yes, allow all edits this session';
+    if (s.mode === 'bypassPermissions') return 'Yes, trust for this session';
+    return `Yes, set mode: ${s.mode}`;
+  }
+  if (s.type === 'addRules' && s.rules && s.rules.length) {
+    const r = s.rules[0];
+    return `Yes, always allow ${r.toolName}(${trn(r.ruleContent || '*', 30)})`;
+  }
+  return 'Yes, remember this';
+}
+
+// Permission banner inside chat view — shows original Claude Code options
+function renderChatPermBanner() {
+  const el = document.getElementById('chat-perm-banner');
+  if (!el || !chatSession) { if (el) { el.classList.remove('show'); el.innerHTML = ''; } return; }
+  const pm = perms.find(p => p.session_id === chatSession.session_id);
+  if (!pm) { el.classList.remove('show'); el.innerHTML = ''; return; }
+  const tn = esc(pm.tool_name || 'Tool');
+  const ti = typeof pm.tool_input === 'string' ? pm.tool_input : JSON.stringify(pm.tool_input || {});
+  const cd = permCountdowns[pm.id];
+  const cdStr = cd ? (() => { const m = Math.floor(cd.remaining / 60), s = cd.remaining % 60; const t = `${m}:${String(s).padStart(2,'0')}`; return cd.remaining < 60 ? ` <span style="color:#FF4444;font-weight:600">${t}</span>` : ` <span style="opacity:0.5">${t}</span>`; })() : '';
+
+  // Build option rows
+  let opts = '';
+  let n = 1;
+  opts += `<div class="cpb-opt" onclick="rPerm('${pm.id}','allow')"><span class="cpb-num">${n++}.</span> Yes</div>`;
+  opts += `<div class="cpb-opt" onclick="rPerm('${pm.id}','allow_session')"><span class="cpb-num">${n++}.</span> Yes, for this session</div>`;
+  const sgs = pm.permission_suggestions || [];
+  sgs.forEach((s) => {
+    const label = esc(suggestionLabel(s));
+    opts += `<div class="cpb-opt" onclick="rPerm('${pm.id}','always_allow')"><span class="cpb-num">${n++}.</span> ${label}</div>`;
+  });
+  opts += `<div class="cpb-opt cpb-no" onclick="rPerm('${pm.id}','deny')"><span class="cpb-num">${n++}.</span> No</div>`;
+  opts += `<div class="cpb-opt cpb-terminal" onclick="rPerm('${pm.id}','ask_terminal')"><span class="cpb-num">${n++}.</span> Handle in terminal</div>`;
+
+  el.classList.add('show');
+  el.innerHTML = `<div class="cpb-tool"><span class="perm-spin" style="color:${C.orange}">+</span> <span class="tool-name">${tn}</span>${cdStr}</div>
+    <div class="cpb-input">${esc(trn(ti, 120))}</div>
+    ${opts}`;
 }
 async function fetchPerms() {
   try {
@@ -850,6 +926,7 @@ async function fetchPerms() {
       perms = newPerms;
       if (perms.length > prev && perms.length > 0) doExpand(false);
       renderSessions();
+      renderChatPermBanner();
     }
   } catch (e) {}
 }
@@ -941,6 +1018,13 @@ function openChat(i) {
   document.getElementById('chat-view').classList.add('show');
   showSettings = false;
 
+  // Expand island taller for chat
+  fetch(`${BASE}/api/island/expand`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ height: 520 })
+  }).catch(() => {});
+
   // Set header
   document.getElementById('chat-title').textContent = proj(s.cwd);
   updateChatStatus(s.status);
@@ -948,6 +1032,7 @@ function openChat(i) {
 
   // Fetch chat history + start polling
   fetchChat();
+  renderChatPermBanner();
   chatPollTimer = setInterval(fetchChat, 2000);
 }
 
@@ -959,6 +1044,9 @@ function closeChat() {
 
   document.getElementById('chat-view').classList.remove('show');
   document.getElementById('sessions').style.display = '';
+
+  // Restore normal island size
+  fetch(`${BASE}/api/island/expand`, { method: 'POST' }).catch(() => {});
 }
 
 function updateChatStatus(status) {
@@ -979,10 +1067,9 @@ function updateChatInputState() {
   if (!chatSession) return;
   const input = document.getElementById('chat-input');
   const btn = document.getElementById('chat-send');
-  const active = chatSession.status === 'active';
-  input.disabled = active;
-  btn.disabled = active;
-  input.placeholder = active ? 'Waiting for Claude to finish...' : 'Send a message...';
+  input.disabled = false;
+  btn.disabled = false;
+  input.placeholder = chatSession.status === 'active' ? 'Claude is working... (force send)' : 'Send a message...';
 }
 
 async function fetchChat() {
@@ -996,6 +1083,16 @@ async function fetchChat() {
     const r = await fetch(`${BASE}/api/chat/v2?${params}`);
     const d = await r.json();
     if (d.messages && d.messages.length > 0) {
+      // Remove optimistic (local-*) messages that match incoming server messages
+      for (const msg of d.messages) {
+        if (msg.event && msg.event.type === 'text' && msg.event.role === 'user') {
+          const idx = chatMessages.findIndex(m =>
+            m.uuid && m.uuid.startsWith('local-') &&
+            m.event && m.event.content === msg.event.content
+          );
+          if (idx !== -1) chatMessages.splice(idx, 1);
+        }
+      }
       chatMessages = chatMessages.concat(d.messages);
       chatNextIndex = d.next_index;
       renderChat();

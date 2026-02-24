@@ -84,15 +84,18 @@ impl fmt::Display for SessionStatus {
 pub enum PermissionDecisionKind {
     Allow,
     Deny,
+    AllowSession,
     AlwaysAllow,
+    /// Pass to terminal — PreToolUse returns "ask", PermissionRequest returns "deny".
+    AskTerminal,
 }
 
 impl PermissionDecisionKind {
     /// Map to Claude Code's hookSpecificOutput behavior string.
     pub fn to_behavior(&self) -> &'static str {
         match self {
-            Self::Allow | Self::AlwaysAllow => "approve",
-            Self::Deny => "deny",
+            Self::Allow | Self::AllowSession | Self::AlwaysAllow => "approve",
+            Self::Deny | Self::AskTerminal => "deny",
         }
     }
 }
@@ -127,6 +130,9 @@ pub struct SignalPayload {
     pub model: String,
     #[serde(default)]
     pub hook_pid: Option<u32>,
+    /// PID of the ancestor claude.exe process (set by hook binary).
+    #[serde(default)]
+    pub agent_pid: Option<u32>,
     #[serde(default)]
     pub parent_session_id: Option<String>,
 }
@@ -138,6 +144,9 @@ pub struct HookPayload {
     pub session_id: String,
     #[serde(default)]
     pub cwd: String,
+    /// PID of the ancestor claude.exe process (set by hook binary).
+    #[serde(default)]
+    pub agent_pid: Option<u32>,
 }
 
 /// POST /api/permission-request — tool permission from hook binary.
@@ -160,6 +169,22 @@ pub struct PermissionRequestPayload {
 pub struct PermissionRespondPayload {
     pub id: String,
     pub decision: PermissionDecisionKind,
+}
+
+/// POST /api/pre-tool-check — PreToolUse hook blocks here for approval.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreToolCheckPayload {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub tool_name: String,
+    #[serde(default = "default_json_object")]
+    pub tool_input: Value,
+    /// The full hook payload (for passthrough fields).
+    #[serde(default = "default_json_object")]
+    pub raw: Value,
 }
 
 /// POST /api/chat/send — send a message to a Claude Code session via SendInput.

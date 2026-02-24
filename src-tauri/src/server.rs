@@ -32,7 +32,7 @@ use crate::sse::SSEBroadcaster;
 use crate::protocol::{
     HookEvent, SessionStatus, PermissionDecisionKind,
     SignalPayload, HookPayload, PermissionRequestPayload, PermissionRespondPayload,
-    ChatSendPayload,
+    PreToolCheckPayload, ChatSendPayload,
 };
 
 pub struct AppState {
@@ -221,6 +221,7 @@ pub async fn run_server(state: Arc<AppState>) {
         .route("/api/permission-request", post(api_permission_request))
         .route("/api/permission-respond", post(api_permission_respond))
         .route("/api/permissions", get(api_permissions))
+        .route("/api/pre-tool-check", post(api_pre_tool_check))
         .route("/api/chat", get(api_chat))
         .route("/api/chat/v2", get(api_chat_v2))
         .route("/api/chat/send", post(api_chat_send))
@@ -254,6 +255,21 @@ async fn version_header(req: axum::extract::Request, next: Next) -> Response {
 pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
     let processes = state.registry.get_cached();
     let session_ttl = state.config.general.session_ttl;
+
+    // Cleanup: remove discovered-{pid} sessions whose PID no longer exists.
+    {
+        let live_pids: std::collections::HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+        let active = state.session_tracker.get_active(session_ttl);
+        for (sid, info) in &active {
+            if sid.starts_with("discovered-") {
+                let still_running = info.agent_pid.map_or(false, |pid| live_pids.contains(&pid));
+                if !still_running {
+                    state.session_tracker.remove(sid);
+                }
+            }
+        }
+    }
+
     let tracked = state.session_tracker.get_active(session_ttl);
 
     // Strategy: session tracker is the source of truth (CWD, status from hooks).
@@ -322,17 +338,25 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
         }
     }
 
-    // Phase 2: pair unmatched processes with unmatched tracker entries (by agent type).
-    // Scanner CWD is unreliable, but a running process proves the session exists.
+    // Phase 2: pair unmatched processes with unmatched tracker entries.
+    //
+    // Prefer PID match (agent_pid from hook) for stable identity.
+    // Fallback to recency sort when PID is unavailable.
     let mut unmatched_trackers: Vec<&crate::session::SessionInfo> = tracked.values()
-        .filter(|i| i.status != SessionStatus::Ended && !matched_sessions.contains(&i.session_id))
+        .filter(|i| {
+            !matched_sessions.contains(&i.session_id)
+                && i.status != SessionStatus::Ended
+        })
         .collect();
-    // Sort: most recently updated first
+    // Sort: most recently updated first (best match wins for recency fallback)
     unmatched_trackers.sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap_or(std::cmp::Ordering::Equal));
 
     for proc in &unmatched_procs {
-        // Find best unmatched tracker entry for this agent type
-        if let Some(idx) = unmatched_trackers.iter().position(|_i| true) {
+        // Try PID match first (stable), then fall back to first available (recency)
+        let idx = unmatched_trackers.iter()
+            .position(|i| i.agent_pid == Some(proc.pid))
+            .or_else(|| if unmatched_trackers.is_empty() { None } else { Some(0) });
+        if let Some(idx) = idx {
             let info = unmatched_trackers.remove(idx);
             matched_sessions.insert(info.session_id.clone());
             let status = match info.status {
@@ -355,11 +379,36 @@ pub fn scan_and_merge(state: &AppState) -> Vec<Value> {
                 "last_message": info.last_message.as_deref().unwrap_or(""),
             }));
         }
-        // else: no tracker entry at all → skip phantom process
+        else {
+            // Phase 3: auto-discover unmatched processes.
+            //
+            // This process is running but has no tracker entry — the SessionStart
+            // hook fired before agent-desk was running (or agent-desk restarted).
+            // Register a "discovered" session so the UI shows it immediately.
+            // When hooks eventually fire (user types something), the session
+            // will get properly updated with correct CWD/status.
+            let synthetic_id = format!("discovered-{}", proc.pid);
+            state.session_tracker.register(
+                &synthetic_id,
+                &proc.cwd,
+                None,
+                Some(proc.pid),
+            );
+            result.push(json!({
+                "pid": proc.pid,
+                "name": proc.name,
+                "agent_type": proc.agent_type,
+                "cwd": &proc.cwd,
+                "uptime": proc.uptime,
+                "create_time": proc.create_time,
+                "status": "waiting",
+                "session_id": &synthetic_id,
+                "notification_type": "",
+                "notification_message": "",
+                "last_message": "",
+            }));
+        }
     }
-
-    // Remaining unmatched tracker entries with no running process → don't show
-    // (stale sessions whose process already exited)
 
     result
 }
@@ -490,7 +539,6 @@ async fn api_hook(
     let event = q.event.as_ref();
     let sid = &payload.session_id;
     let cwd = &payload.cwd;
-
     // Dedup: skip if same session+event within 500ms window
     if let Some(ev) = event {
         if !sid.is_empty() {
@@ -515,6 +563,7 @@ async fn api_hook(
                 // Clear stale notification on new activity
                 notification_type: Some(String::new()),
                 notification_message: Some(String::new()),
+                agent_pid: payload.agent_pid,
                 ..Default::default()
             },
         );
@@ -559,7 +608,7 @@ async fn api_signal(
                     sid,
                     cwd,
                     if model.is_empty() { None } else { Some(model.as_str()) },
-                    None,
+                    payload.agent_pid,
                 );
                 // Link sub-agent to parent if parent_session_id is present
                 if let Some(ref parent_id) = payload.parent_session_id {
@@ -583,6 +632,7 @@ async fn api_signal(
                         ..Default::default()
                     },
                 );
+                state.permissions.clear_session_rules(sid);
             }
             HookEvent::Stop => {
                 state.session_tracker.update(
@@ -628,6 +678,17 @@ async fn api_signal(
                 );
             }
             _ => {}
+        }
+
+        // Store agent PID on every event (catches sessions where SessionStart was missed)
+        if let Some(apid) = payload.agent_pid {
+            state.session_tracker.update(
+                sid,
+                SessionUpdate {
+                    agent_pid: Some(apid),
+                    ..Default::default()
+                },
+            );
         }
     }
 
@@ -849,12 +910,20 @@ async fn api_delete_session(
     Json(json!({ "ok": true }))
 }
 
-async fn api_island_expand(State(state): State<Arc<AppState>>) -> Json<Value> {
+async fn api_island_expand(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<Value>>,
+) -> Json<Value> {
     if let Some(handle) = state.app_handle.get() {
         use tauri::Manager;
         if let Some(w) = handle.get_webview_window("island") {
-            let pw = state.config.island.panel_width;
-            let ph = state.config.island.panel_height;
+            let (pw, ph) = if let Some(Json(b)) = body {
+                let pw = b.get("width").and_then(|v| v.as_u64()).unwrap_or(state.config.island.panel_width as u64) as u32;
+                let ph = b.get("height").and_then(|v| v.as_u64()).unwrap_or(state.config.island.panel_height as u64) as u32;
+                (pw, ph)
+            } else {
+                (state.config.island.panel_width, state.config.island.panel_height)
+            };
             // Animation takes ~200ms — run off the tokio thread
             tokio::task::spawn_blocking(move || {
                 crate::island::expand(&w, pw, ph);
@@ -926,6 +995,19 @@ async fn api_permission_request(
     let tool_name = payload.tool_name;
     let tool_input = payload.tool_input;
     let permission_suggestions = payload.permission_suggestions;
+
+    // Check session auto-approve rules before registering
+    if state.permissions.check_session_rule(&session_id, &tool_name) {
+        return Json(json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "approve",
+                    "updatedPermissions": [],
+                }
+            }
+        }));
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
@@ -1047,11 +1129,18 @@ async fn api_permission_respond(
     let id = &payload.id;
     let decision = payload.decision;
 
-    // Look up the session_id before responding (respond removes the request)
-    let session_id = {
+    // Look up session_id and tool_name before responding (respond removes the request)
+    let (session_id, tool_name) = {
         let pending = state.permissions.get_pending();
-        pending.iter().find(|r| r.id == *id).map(|r| r.session_id.clone())
+        pending.iter().find(|r| r.id == *id).map(|r| (r.session_id.clone(), r.tool_name.clone())).unzip()
     };
+
+    // For AllowSession, cache the rule before responding
+    if decision == PermissionDecisionKind::AllowSession {
+        if let (Some(sid), Some(tn)) = (&session_id, &tool_name) {
+            state.permissions.add_session_rule(sid, tn);
+        }
+    }
 
     let ok = state.permissions.respond(id, decision.clone());
 
@@ -1059,8 +1148,9 @@ async fn api_permission_respond(
     if ok {
         if let Some(sid) = &session_id {
             let new_status = match decision {
-                PermissionDecisionKind::Allow | PermissionDecisionKind::AlwaysAllow => SessionStatus::Active,
+                PermissionDecisionKind::Allow | PermissionDecisionKind::AllowSession | PermissionDecisionKind::AlwaysAllow => SessionStatus::Active,
                 PermissionDecisionKind::Deny => SessionStatus::Waiting,
+                PermissionDecisionKind::AskTerminal => SessionStatus::Waiting, // handed off to terminal
             };
             state.session_tracker.update(sid, SessionUpdate {
                 status: Some(new_status),
@@ -1083,6 +1173,169 @@ async fn api_permission_respond(
 async fn api_permissions(State(state): State<Arc<AppState>>) -> Json<Value> {
     let requests = state.permissions.get_pending();
     Json(json!({ "requests": requests }))
+}
+
+// ─── PreToolUse check endpoint ───────────────────────────
+
+/// Tools that are always auto-approved (read-only, safe).
+const SAFE_TOOLS: &[&str] = &[
+    "Read", "Glob", "Grep", "WebFetch", "WebSearch",
+    "TodoRead", "TodoWrite", "ListMcpResourcesTool", "ReadMcpResourceTool",
+    "mcp__playwright__browser_snapshot", "mcp__playwright__browser_take_screenshot",
+    "mcp__playwright__browser_console_messages", "mcp__playwright__browser_network_requests",
+    "mcp__playwright__browser_tabs",
+    "mcp__agent-browser__browser_snapshot", "mcp__agent-browser__browser_screenshot",
+    "mcp__agent-browser__browser_get_text", "mcp__agent-browser__browser_get_html",
+    "mcp__agent-browser__browser_get_url", "mcp__agent-browser__browser_get_title",
+    "mcp__agent-browser__browser_get_attribute", "mcp__agent-browser__browser_is_visible",
+    "mcp__agent-browser__browser_is_enabled", "mcp__agent-browser__browser_is_checked",
+    "mcp__agent-browser__browser_get_console", "mcp__agent-browser__browser_get_network",
+    "mcp__agent-browser__browser_get_cookies",
+    "Task", "AskUserQuestion",
+];
+
+/// PreToolUse hook POSTs here and blocks until user responds (long-poll).
+/// Returns PreToolUse hookSpecificOutput format.
+///
+/// Flow:
+/// 1. Safe tool → instant allow
+/// 2. Session rule cached → instant allow
+/// 3. Otherwise → register permission request, long-poll, return decision
+async fn api_pre_tool_check(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<PreToolCheckPayload>, JsonRejection>,
+) -> Json<Value> {
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => return Json(json!({ "ok": false, "error": format!("{}", e) })),
+    };
+    let session_id = payload.session_id;
+    let cwd = payload.cwd;
+    let tool_name = payload.tool_name;
+    let tool_input = payload.tool_input;
+
+    // 1. Safe tools → instant allow
+    if SAFE_TOOLS.contains(&tool_name.as_str()) {
+        return Json(json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "safe tool (auto-allowed)"
+            }
+        }));
+    }
+
+    // 2. Session auto-approve rules
+    if state.permissions.check_session_rule(&session_id, &tool_name) {
+        return Json(json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "session auto-approved"
+            }
+        }));
+    }
+
+    // 3. Register permission request and long-poll
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+
+    let req = crate::permission::PermissionRequest {
+        id: id.clone(),
+        session_id: session_id.clone(),
+        cwd: cwd.clone(),
+        tool_name: tool_name.clone(),
+        tool_input: tool_input.clone(),
+        permission_suggestions: json!([]),
+        timestamp: now,
+        timeout_secs: state.config.island.permission_timeout_secs,
+    };
+
+    let rx = state.permissions.register(req);
+    let timeout_secs = state.config.island.permission_timeout_secs;
+
+    // SSE broadcast + sound + auto-expand island
+    state.sse.broadcast("permission_request", json!({
+        "id": &id,
+        "tool_name": &tool_name,
+        "session_id": &session_id,
+        "timeout_secs": timeout_secs,
+    }));
+    let _ = state.notify_tray.send(());
+
+    if let Some(handle) = state.app_handle.get() {
+        use tauri::Manager;
+        if let Some(w) = handle.get_webview_window("island") {
+            let _ = w.show();
+            let _ = w.eval("if(window.onExpand)window.onExpand();fetchPermissions();");
+            let pw = state.config.island.panel_width;
+            let ph = state.config.island.panel_height;
+            tokio::task::spawn_blocking(move || {
+                crate::island::expand(&w, pw, ph);
+            });
+        }
+        if state.live_sound_enabled.load(Ordering::Relaxed) {
+            let st = read_lock!(state.live_sound_permission).clone();
+            crate::tray::play_notification_sound(&st);
+        }
+    }
+
+    // Countdown SSE
+    let countdown_sse = state.sse.clone();
+    let countdown_id = id.clone();
+    let countdown_handle = tokio::spawn(async move {
+        let mut remaining = timeout_secs;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            remaining = remaining.saturating_sub(10);
+            countdown_sse.broadcast("permission_countdown", json!({
+                "id": &countdown_id,
+                "remaining": remaining,
+                "total": timeout_secs,
+            }));
+            if remaining == 0 { break; }
+        }
+    });
+
+    // Long-poll: wait for decision
+    let decision = tokio::time::timeout(
+        tokio::time::Duration::from_secs(timeout_secs),
+        rx,
+    ).await;
+
+    countdown_handle.abort();
+
+    match decision {
+        Ok(Ok(d)) => {
+            let perm_decision = match &d {
+                PermissionDecisionKind::Allow | PermissionDecisionKind::AllowSession | PermissionDecisionKind::AlwaysAllow => "allow",
+                PermissionDecisionKind::Deny => "deny",
+                PermissionDecisionKind::AskTerminal => "ask", // hand off to terminal
+            };
+            let reason = match &d {
+                PermissionDecisionKind::AskTerminal => "user chose to handle in terminal",
+                _ => "user decision from Agent Desk",
+            };
+            Json(json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": perm_decision,
+                    "permissionDecisionReason": reason
+                }
+            }))
+        }
+        _ => {
+            // Timeout or channel closed → ask Claude Code to show its own prompt
+            state.permissions.remove(&id);
+            Json(json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": "timeout — falling back to terminal prompt"
+                }
+            }))
+        }
+    }
 }
 
 // ─── Hotkey settings endpoints ───────────────────────────

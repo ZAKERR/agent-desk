@@ -49,11 +49,33 @@ fn now_ts() -> f64 {
 impl SessionTracker {
     pub fn new(path: String) -> Self {
         let path = PathBuf::from(&path);
-        let sessions = Self::load_from_file(&path);
+        let mut sessions = Self::load_from_file(&path);
+
+        // Startup cleanup: demote stale "active" sessions.
+        // Sessions stuck in Active from a previous run (no hook will update them)
+        // get demoted to Idle so they don't show as "Working..." on restart.
+        let now = now_ts();
+        let stale_threshold = 300.0; // 5 minutes
+        let mut cleaned = false;
+        for info in sessions.values_mut() {
+            let is_stale = (now - info.updated_at) > stale_threshold;
+            let should_demote = is_stale && matches!(
+                info.status,
+                SessionStatus::Active | SessionStatus::Waiting | SessionStatus::Stopped
+            );
+            if should_demote {
+                info.status = SessionStatus::Idle;
+                // Do NOT update updated_at — keep old timestamp so Phase 2
+                // matching won't treat this as a recently-active session.
+                cleaned = true;
+            }
+        }
+
+        let dirty = AtomicBool::new(cleaned);
         Self {
             sessions: RwLock::new(sessions),
             path,
-            dirty: AtomicBool::new(false),
+            dirty,
         }
     }
 

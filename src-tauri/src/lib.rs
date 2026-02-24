@@ -49,8 +49,9 @@ pub fn run() {
     // Give the HTTP server a moment to bind
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Spawn hook daemon (persistent TCP relay for lower latency)
-    setup::spawn_hook_daemon(port);
+    // Kill orphaned daemon from previous crash, then spawn fresh
+    setup::kill_orphaned_daemon(port);
+    let daemon_pid = setup::spawn_hook_daemon(port);
 
     // Build Tauri app
     tauri::Builder::default()
@@ -130,6 +131,12 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    // Tauri event loop exited — kill hook daemon and force-terminate all threads
+    if let Some(pid) = daemon_pid {
+        setup::kill_hook_daemon(pid);
+    }
+    std::process::exit(0);
 }
 
 /// Initialize tracing with console output + rolling JSON file.

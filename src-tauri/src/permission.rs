@@ -9,7 +9,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
@@ -32,6 +32,8 @@ pub struct PermissionStore {
     requests: Mutex<HashMap<String, PermissionRequest>>,
     /// Oneshot senders waiting for decisions (keyed by request id).
     senders: Mutex<HashMap<String, oneshot::Sender<PermissionDecisionKind>>>,
+    /// Session-scoped auto-approvals: (session_id, tool_name) → auto-approve.
+    session_rules: Mutex<HashSet<(String, String)>>,
 }
 
 impl PermissionStore {
@@ -39,6 +41,7 @@ impl PermissionStore {
         Self {
             requests: Mutex::new(HashMap::new()),
             senders: Mutex::new(HashMap::new()),
+            session_rules: Mutex::new(HashSet::new()),
         }
     }
 
@@ -74,5 +77,20 @@ impl PermissionStore {
     pub fn remove(&self, id: &str) {
         mutex_lock!(self.requests).remove(id);
         mutex_lock!(self.senders).remove(id);
+    }
+
+    /// Add a session-scoped auto-approve rule.
+    pub fn add_session_rule(&self, session_id: &str, tool_name: &str) {
+        mutex_lock!(self.session_rules).insert((session_id.to_string(), tool_name.to_string()));
+    }
+
+    /// Check if a tool is auto-approved for this session.
+    pub fn check_session_rule(&self, session_id: &str, tool_name: &str) -> bool {
+        mutex_lock!(self.session_rules).contains(&(session_id.to_string(), tool_name.to_string()))
+    }
+
+    /// Clear all session rules for a session (on session end).
+    pub fn clear_session_rules(&self, session_id: &str) {
+        mutex_lock!(self.session_rules).retain(|(sid, _)| sid != session_id);
     }
 }

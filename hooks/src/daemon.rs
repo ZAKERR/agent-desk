@@ -59,11 +59,44 @@ pub fn run(port: u16) {
 
         // Route and forward
         let response = match event {
-            "user_prompt" | "pre_tool" => {
+            "user_prompt" => {
                 let url = format!("http://127.0.0.1:{}/api/hook?event={}", port, event);
                 match agent.post(&url).header("Content-Type", "application/json").send_json(&data) {
                     Ok(mut r) => r.body_mut().read_to_string().unwrap_or_default(),
                     Err(_) => "{\"ok\":false}".to_string(),
+                }
+            }
+            "pre_tool" => {
+                // PreToolUse: blocking long-poll to /api/pre-tool-check.
+                // Build structured payload from hook data.
+                let tool_name = data.get("tool_name")
+                    .or_else(|| data.get("toolName"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tool_input = data.get("tool_input")
+                    .or_else(|| data.get("input"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+                let session_id = data.get("session_id")
+                    .or_else(|| data.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let cwd = data.get("cwd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let payload = serde_json::json!({
+                    "session_id": session_id,
+                    "cwd": cwd,
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "raw": &data,
+                });
+
+                let url = format!("http://127.0.0.1:{}/api/pre-tool-check", port);
+                match agent.post(&url).header("Content-Type", "application/json").send_json(&payload) {
+                    Ok(mut r) => r.body_mut().read_to_string().unwrap_or_default(),
+                    Err(_) => String::new(), // empty = no output, Claude Code proceeds normally
                 }
             }
             "permission_request" => {
@@ -97,9 +130,9 @@ pub fn try_send(port: u16, data: &serde_json::Value) -> Option<String> {
         std::time::Duration::from_millis(50),
     ).ok()?;
 
-    // Set read timeout (permission_request can take up to 660s)
+    // Set read timeout (permission_request and pre_tool can take up to 660s)
     let event = data.get("event").and_then(|v| v.as_str()).unwrap_or("");
-    let read_timeout = if event == "permission_request" {
+    let read_timeout = if event == "permission_request" || event == "pre_tool" {
         std::time::Duration::from_secs(660)
     } else {
         std::time::Duration::from_secs(5)
